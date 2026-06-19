@@ -1,0 +1,6 @@
+{
+  "name": "البيت السعيد لمصاريف المنزل",
+  "description": "تطبيق متكامل لإدارة مصاريف المنزل بذكاء وسهولة متوافق مع كافة الهواتف الذكية مع قاعدة بيانات SQLite وجداول تفاعلية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

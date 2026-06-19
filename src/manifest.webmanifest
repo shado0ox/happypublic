@@ -1,0 +1,22 @@
+{
+  "name": "البيت السعيد لميزانية الأسرة",
+  "short_name": "البيت السعيد",
+  "description": "تطبيق ذكي وبسيط لإدارة المصاريف والميزانية العائلية وتذكير الفواتير المتكررة.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fef9f0",
+  "theme_color": "#0a7c6b",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/src/assets/images/happy_home_logo_1781910968387.jpg",
+      "type": "image/jpeg",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/src/assets/images/happy_home_logo_1781910968387.jpg",
+      "type": "image/jpeg",
+      "sizes": "512x512"
+    }
+  ]
+}
