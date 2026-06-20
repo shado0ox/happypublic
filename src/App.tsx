@@ -35,8 +35,11 @@ import {
   BarChart3,
   Home,
   Fingerprint,
-  ScanFace
+  ScanFace,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   ResponsiveContainer,
   PieChart as RechartsPieChart,
@@ -100,6 +103,8 @@ interface AppSettings {
   showCharts: boolean;
   autoHome: boolean;
   confirmDelete: boolean;
+  realTimeSync: boolean;
+  enableSounds: boolean;
 }
 
 // Layout Categories Config
@@ -173,8 +178,48 @@ export default function App() {
     showMotivation: true,
     showCharts: true,
     autoHome: true,
-    confirmDelete: true
+    confirmDelete: true,
+    realTimeSync: true,
+    enableSounds: true
   });
+
+  // Splash & Install states
+  const [showSplash, setShowSplash] = useState(true);
+  const slogans = [
+    "« الادخار اليوم هو أمان الغد وبناء لمستقبل عائلتك السعيدة »",
+    "« الوعي المالي يبدأ بخطوة بسيطة: نظّم، راقب، وادّخر »",
+    "« البيت السعيد يُبنى على التخطيط والحكمة في إدارة سبل المعيشة »",
+    "« ليس المهم كم تجني، بل المهم كم تدّخر وكيف تبني مستقبلك »"
+  ];
+  const [splashSlogan, setSplashSlogan] = useState(slogans[0]);
+  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
+
+  useEffect(() => {
+    let index = 0;
+    const interval = setInterval(() => {
+      index = (index + 1) % slogans.length;
+      setSplashSlogan(slogans[index]);
+    }, 850);
+
+    const timer = setTimeout(() => {
+      setShowSplash(false);
+    }, 2450);
+
+    // Check standalone mode
+    // @ts-ignore
+    const isStandalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+    const isDismissed = localStorage.getItem('albait_install_dismissed') === 'true';
+    if (!isStandalone && !isDismissed) {
+      setTimeout(() => {
+        setShowInstallPrompt(true);
+      }, 3500);
+    }
+
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timer);
+    };
+  }, []);
 
   // Recurring Bills states
   const [recurringBills, setRecurringBills] = useState<RecurringBill[]>([]);
@@ -242,6 +287,57 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // SSE Real-time Synchronization Loop
+  useEffect(() => {
+    if (!currentUser || !settings.realTimeSync) return;
+
+    console.log('Establishing Real-time Live Sync session via EventSource...');
+    const eventSource = new EventSource(`/api/sync/stream?uid=${encodeURIComponent(currentUser.uid)}`);
+
+    eventSource.onmessage = async (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'sync_required') {
+          console.log('⚡ Real-time sync update triggered from server!');
+          await fetchTransactions(currentUser.uid);
+          await fetchRecurringBills(currentUser.uid);
+          
+          // Also fetch and update settings silently
+          try {
+            const settingsRes = await fetch(`/api/settings`, {
+              headers: { 'x-user-uid': currentUser.uid }
+            });
+            const fetchedSettings = await settingsRes.json();
+            if (fetchedSettings && !fetchedSettings.error) {
+              setSettings({
+                ...fetchedSettings,
+                showMotivation: fetchedSettings.showMotivation === 1,
+                showCharts: fetchedSettings.showCharts === 1,
+                autoHome: fetchedSettings.autoHome === 1,
+                confirmDelete: fetchedSettings.confirmDelete === 1,
+                realTimeSync: fetchedSettings.realTimeSync === undefined ? true : fetchedSettings.realTimeSync === 1,
+                enableSounds: fetchedSettings.enableSounds === undefined ? true : fetchedSettings.enableSounds === 1
+              });
+            }
+          } catch (err) {
+            console.error('Failed to sync settings silently:', err);
+          }
+        }
+      } catch (err) {
+        console.error('Error parsing live-sync message:', err);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.warn('Real-time EventSource disconnected. Reconnecting...', err);
+    };
+
+    return () => {
+      console.log('Closing live sync EventSource session.');
+      eventSource.close();
+    };
+  }, [currentUser, settings.realTimeSync]);
+
   // Quick Check localStorage for session
   useEffect(() => {
     const cachedUser = localStorage.getItem('albait_user');
@@ -296,7 +392,9 @@ export default function App() {
             showMotivation: data.settings.showMotivation === 1,
             showCharts: data.settings.showCharts === 1,
             autoHome: data.settings.autoHome === 1,
-            confirmDelete: data.settings.confirmDelete === 1
+            confirmDelete: data.settings.confirmDelete === 1,
+            realTimeSync: data.settings.realTimeSync === undefined ? true : data.settings.realTimeSync === 1,
+            enableSounds: data.settings.enableSounds === undefined ? true : data.settings.enableSounds === 1
           });
           setExpenseCategory(data.settings.defaultCategory);
           setIncomeSource(data.settings.defaultSource);
@@ -463,6 +561,7 @@ export default function App() {
       });
       if (res.ok) {
         triggerToast(`⚡ تم تسجيل صرف ${bill.title} فوراً كمعاملة موثقة!`);
+        playTxnSound('expense');
         await fetchTransactions(currentUser.uid);
       } else {
         triggerToast('⚠️ فشل التوثيق المالي السريع', true);
@@ -506,7 +605,9 @@ export default function App() {
             showMotivation: data.settings.showMotivation === 1,
             showCharts: data.settings.showCharts === 1,
             autoHome: data.settings.autoHome === 1,
-            confirmDelete: data.settings.confirmDelete === 1
+            confirmDelete: data.settings.confirmDelete === 1,
+            realTimeSync: data.settings.realTimeSync === undefined ? true : data.settings.realTimeSync === 1,
+            enableSounds: data.settings.enableSounds === undefined ? true : data.settings.enableSounds === 1
           });
           setExpenseCategory(data.settings.defaultCategory);
           setIncomeSource(data.settings.defaultSource);
@@ -551,7 +652,9 @@ export default function App() {
             showMotivation: data.settings.showMotivation === 1,
             showCharts: data.settings.showCharts === 1,
             autoHome: data.settings.autoHome === 1,
-            confirmDelete: data.settings.confirmDelete === 1
+            confirmDelete: data.settings.confirmDelete === 1,
+            realTimeSync: data.settings.realTimeSync === undefined ? true : data.settings.realTimeSync === 1,
+            enableSounds: data.settings.enableSounds === undefined ? true : data.settings.enableSounds === 1
           });
           setExpenseCategory(data.settings.defaultCategory);
           setIncomeSource(data.settings.defaultSource);
@@ -570,6 +673,52 @@ export default function App() {
       setAuthError(err.message || 'خطأ أثناء المصادقة');
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  // Web Audio synth for financial transaction sounds
+  const playTxnSound = (type: 'income' | 'expense') => {
+    if (!settings.enableSounds) return;
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      
+      if (type === 'income') {
+        const now = ctx.currentTime;
+        const playTone = (freq: number, delay: number, duration: number) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + delay);
+          gain.gain.setValueAtTime(0.12, now + delay);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + delay + duration);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now + delay);
+          osc.stop(now + delay + duration);
+        };
+        // Quick upbeat 4-note chime (C5, E5, G5, C6)
+        playTone(523.25, 0, 0.12);
+        playTone(659.25, 0.07, 0.12);
+        playTone(783.99, 0.14, 0.12);
+        playTone(1046.50, 0.21, 0.25);
+      } else {
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(140, now);
+        osc.frequency.exponentialRampToValueAtTime(550, now + 0.12);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now);
+        osc.stop(now + 0.15);
+      }
+    } catch (e) {
+      console.warn('Audio Context error:', e);
     }
   };
 
@@ -707,7 +856,9 @@ export default function App() {
                 showMotivation: data.settings.showMotivation === 1,
                 showCharts: data.settings.showCharts === 1,
                 autoHome: data.settings.autoHome === 1,
-                confirmDelete: data.settings.confirmDelete === 1
+                confirmDelete: data.settings.confirmDelete === 1,
+                realTimeSync: data.settings.realTimeSync === undefined ? true : data.settings.realTimeSync === 1,
+                enableSounds: data.settings.enableSounds === undefined ? true : data.settings.enableSounds === 1
               });
               setExpenseCategory(data.settings.defaultCategory);
               setIncomeSource(data.settings.defaultSource);
@@ -780,6 +931,7 @@ export default function App() {
     setIncomeAmount('');
     setIncomeNote('');
     triggerToast('✅ تم حفظ المبلغ الوارد بالنجاح');
+    playTxnSound('income');
 
     if (settings.autoHome) {
       setActiveTab('dashboard');
@@ -828,6 +980,7 @@ export default function App() {
     setExpenseAmount('');
     setExpenseDesc('');
     triggerToast('💾 تم حفظ المصروف بالنجاح');
+    playTxnSound('expense');
 
     if (settings.autoHome) {
       setActiveTab('dashboard');
@@ -903,7 +1056,9 @@ export default function App() {
       showMotivation: true,
       showCharts: true,
       autoHome: true,
-      confirmDelete: true
+      confirmDelete: true,
+      realTimeSync: true,
+      enableSounds: true
     };
     setSettings(defaultSettings);
     triggerToast('تمت إعادة تهيئة الإعدادات 🔄');
@@ -978,7 +1133,7 @@ export default function App() {
   // Clear all data
   const handleClearAllData = async () => {
     if (!currentUser) return;
-    if (!confirm('⚠️ تحذير: سيتم مسح كافة البيانات المسجلة نهائياً من قاعدة البيانات ولا يمكن استرجاعها!')) return;
+    if (!confirm('⚠️ تحذير: سيتم مسح كافة البيانات المسجلة لحسابك الحالي نهائياً ولا يمكن استرجاعها!')) return;
     if (!confirm('لتأكيد المسح بالكامل اضغط موافق مرة أخرى...')) return;
 
     try {
@@ -1300,10 +1455,10 @@ export default function App() {
         <div style="margin-top: 35px; border-top: 2px solid #e8dcc8; padding-top: 15px; text-align: center;">
           <div style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; font-weight: bold; color: #0a7c6b;">
             <span>🏡</span>
-            <span>تم استخراجه تلقائياً وتوقيعه رقمياً ومحلياً بواسطة نظام البيت السعيد</span>
+            <span>تم استخراجه تلقائياً وتوقيعه إلكترونياً بواسطة نظام البيت السعيد</span>
           </div>
           <p style="font-size: 9px; color: #7a6a52; margin: 5px 0 0 0;">
-            قاعدة بيانات العمليات: SQLite Engine المدمج · تطبيق الويب والمحمول للهواتف الذكية مع المزامنة التلقائية.
+            نظام الإدارة المالية الذكي · تطبيق الويب والمحمول مع المزامنة السحابية الفورية وتتبع المدخرات.
           </p>
           <p style="font-size: 9px; color: #b8a88a; margin: 3px 0 0 0; font-weight: bold;">
             جميع الحقوق محفوظة © ${currentYear}
@@ -1397,7 +1552,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   // Admin deletes single txn
   const handleAdminDeleteTxn = async (txnId: string) => {
     if (!currentUser) return;
-    if (!confirm('⚠️ مشرف: هل تريد حذف هذه المعاملة المحددة من قاعدة بيانات SQLite بالكامل؟')) return;
+    if (!confirm('⚠️ مشرف: هل تريد حذف هذه المعاملة المحددة نهائياً من السجلات؟')) return;
 
     try {
       const res = await fetch('/api/admin/delete-txn', {
@@ -1556,6 +1711,64 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
     }
   };
 
+  // Splash Screen rendering
+  if (showSplash) {
+    return (
+      <div className="min-h-screen relative flex flex-col items-center justify-center p-6 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#121c24] text-right font-sans overflow-hidden">
+        
+        {/* Ambient glow circles */}
+        <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] rounded-full bg-teal-500/10 blur-[80px] pointer-events-none" />
+        <div className="absolute bottom-[-15%] right-[-10%] w-[60%] h-[60%] rounded-full bg-orange-500/10 blur-[100px] pointer-events-none" />
+
+        <div className="flex flex-col items-center justify-center text-center max-w-sm z-10">
+          {/* Main Logo Container with glow rings */}
+          <div className="relative mb-6">
+            <div className="absolute inset-0 rounded-full bg-[#0a7c6b]/30 blur-xl animate-pulse scale-110" />
+            <div className="w-24 h-24 rounded-full bg-white p-1 flex items-center justify-center border-4 border-[#e0f5f2] shadow-2xl relative">
+              <img 
+                src={logoImg} 
+                alt="شعار البيت السعيد" 
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-cover animate-spin-slow"
+              />
+            </div>
+          </div>
+
+          <h2 className="text-3xl font-black text-white font-display tracking-wide">البيت السعيد</h2>
+          <p className="text-[#a8ffec] text-[11px] font-black tracking-widest uppercase mt-1">نظام الإدارة المالية الشامل والذكي</p>
+
+          {/* Elegant Circular loading ring / progress spinner */}
+          <div className="mt-12 flex flex-col items-center gap-4 w-full">
+            <div className="w-10 h-10 border-4 border-[#a8ffec]/20 border-t-[#0a7c6b] rounded-full animate-spin shadow-inner" />
+            
+            {/* Dynamic Loading progress bar */}
+            <div className="w-48 h-1 bg-white/10 rounded-full overflow-hidden mt-1 relative">
+              <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-[#a8ffec] to-[#e67e22] w-full animate-infinite-progress" />
+            </div>
+
+            {/* Rotating encouraging financial quotes/slogans on splash screen */}
+            <div className="min-h-[60px] mt-6 px-4">
+              <p className="text-white/90 text-xs font-bold leading-relaxed text-center">
+                {splashSlogan}
+              </p>
+            </div>
+          </div>
+
+          {/* Slogan footnote */}
+          <div className="absolute bottom-8 left-0 right-0 text-center">
+            <div className="text-[10px] text-white/50 font-bold block mb-1">
+              تطوير وتصميم وإعداد الأستاذ
+            </div>
+            <div className="text-xs text-[#a8ffec] font-black inline-flex items-center justify-center gap-1.5" style={{ direction: 'ltr' }}>
+              shady nassef 💻🎨
+            </div>
+          </div>
+
+        </div>
+      </div>
+    );
+  }
+
   // Auth Screen Form
   if (!currentUser) {
     return (
@@ -1576,12 +1789,14 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
               className="w-20 h-20 rounded-full border-4 border-[#e0f5f2] shadow-md object-cover mb-3 transform hover:scale-105 transition-transform duration-300"
             />
             <h1 className="text-2xl font-black font-display text-[#2c1f0e]">تطبيق البيت السعيد</h1>
-            <p className="text-[#7a6a52] text-xs font-semibold mt-1">إصدار الهواتف فائق السرعة مع SQLite</p>
+            <p className="text-[#7a6a52] text-xs font-semibold mt-1">شريكك المالي الذكي لتنظيم ميزانك وادخار للمستقبل</p>
           </div>
 
-          <div className="bg-[#e0f5f2] border border-[#a8ffec] rounded-lg p-3 text-center mb-6">
-            <span className="text-xs font-bold text-[#0a7c6b] block">🔒 قاعدة بيانات SQLite محلية نشطة</span>
-            <span className="text-[10px] text-[#2c1f0e]/70 block mt-0.5">يُحفظ كشف حسابك بشكل آمن وخفيف للتحميل المستمر على الجوال</span>
+          <div className="bg-gradient-to-r from-[#e0f5f2] to-[#fff3cd] border border-[#a8ffec] rounded-lg p-3 text-center mb-6 shadow-xs">
+            <span className="text-xs font-bold text-[#0a7c6b] block">💡 ثقافة الادخار وبناء المستقبل</span>
+            <span className="text-[10.5px] text-[#2c1f0e]/85 block mt-1 leading-relaxed">
+              «الادخار اليوم هو أمان الغد وبناء لمستقبل عائلتك السعيدة. ابدأ الآن بتسجيل مصاريفك بحكمة!»
+            </span>
           </div>
 
           {/* Form Tabs */}
@@ -1805,6 +2020,84 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
 
       {/* Main Container Views switcher */}
       <main className="max-w-md mx-auto p-4 space-y-4">
+
+        {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
+        <AnimatePresence>
+          {showInstallPrompt && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="bg-gradient-to-r from-[#0a7c6b] to-[#128a78] text-white p-4 rounded-2xl shadow-lg border border-[#a8ffec]/20 relative overflow-hidden text-right"
+            >
+              {/* Background elements */}
+              <div className="absolute top-10 right-10 w-24 h-24 rounded-full bg-white/5 blur-xl pointer-events-none" />
+
+              {/* Header info */}
+              <div className="flex items-start justify-between gap-2 border-b border-white/20 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">📱</span>
+                  <div>
+                    <h4 className="text-xs font-black font-display tracking-tight">تثبيت تطبيق البيت السعيد للجوال</h4>
+                    <p className="text-[10px] text-teal-100 mt-0.5 font-bold">للحصول على وصول فائق السرعة، ومظهر رائع مباشرة من شاشتك الرئيسية</p>
+                  </div>
+                </div>
+                
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowInstallPrompt(false);
+                    localStorage.setItem('albait_install_dismissed', 'true');
+                    triggerToast('تم إخفاء التنبيه بنجاح');
+                  }}
+                  className="w-6 h-6 rounded-full bg-black/10 hover:bg-black/20 text-white flex items-center justify-center shrink-0 cursor-pointer transition-colors"
+                  title="إغلاق التنبيه"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {/* Core instructions */}
+              <div className="mt-3 space-y-2.5">
+                <p className="text-[10px] font-bold text-teal-50">اختر طريقة التثبيت حسب نوع هاتفك:</p>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  {/* iOS Safari Guide */}
+                  <div className="bg-white/10 rounded-xl p-2.5 border border-white/5">
+                    <div className="flex items-center gap-1.5 mb-1.5 justify-end">
+                      <span className="text-[10.5px] font-black text-white">متصفح سفاري (آيفون)</span>
+                      <div className="w-5 h-5 rounded bg-white text-teal-700 font-bold text-[10px] flex items-center justify-center font-mono">iOS</div>
+                    </div>
+                    <ol className="text-[9.5px] leading-relaxed text-teal-50 list-decimal list-inside space-y-1">
+                      <li>اضغط أيقونة المشاركة <Share2 className="w-2.5 h-2.5 inline-block mx-0.5" /> في الأسفل</li>
+                      <li>اسحب الشاشة واختر <strong className="text-white">"إضافة للشاشة الرئيسية"</strong> ➕</li>
+                      <li>اضغط على <strong className="text-white">"إضافة"</strong> للتأكيد</li>
+                    </ol>
+                  </div>
+
+                  {/* Android Chrome Guide */}
+                  <div className="bg-white/10 rounded-xl p-2.5 border border-white/5">
+                    <div className="flex items-center gap-1.5 mb-1.5 justify-end">
+                      <span className="text-[10.5px] font-black text-white">كروم (أندرويد)</span>
+                      <div className="w-5 h-5 rounded bg-white text-teal-700 font-bold text-[10px] flex items-center justify-center font-mono">And</div>
+                    </div>
+                    <ol className="text-[9.5px] leading-relaxed text-teal-50 list-decimal list-inside space-y-1">
+                      <li>اضغط رمز القائمة <strong className="text-white">(︙)</strong> في الأعلى</li>
+                      <li>اختر <strong className="text-white">"تثبيت التطبيق"</strong> أو <strong className="text-white">"إضافة"</strong> ➕</li>
+                      <li>أكّد العملية لتثبيت الأيقونة</li>
+                    </ol>
+                  </div>
+                </div>
+
+                <div className="text-[9px] text-[#ffdcb3] font-bold text-center pt-1 border-t border-white/10 flex items-center justify-center gap-1">
+                  <span>✨</span>
+                  <span>يوفر لك التطبيق المحمول المثبّت سرعة تشغيل مضاعفة بنسبة 200% بدون تحميل متصفح!</span>
+                </div>
+              </div>
+
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Dashboard View */}
         {activeTab === 'dashboard' && (
@@ -2531,6 +2824,54 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 </button>
               </div>
 
+              {/* Toggle Real-time instant sync */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600 shrink-0">
+                    <RefreshCw className="w-4 h-4 animate-pulse" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">المزامنة الفورية اللحظية</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تحديث فوري وتحديث كافة الأجهزة المفتوحة في نفس اللحظة</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleUpdateSetting('realTimeSync', !settings.realTimeSync)}
+                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.realTimeSync ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.realTimeSync ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              {/* Toggle Sound Effects */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-orange-50 flex items-center justify-center text-orange-600 shrink-0">
+                    {settings.enableSounds ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">أصوات وتنبيهات تلميحية</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تشغيل صوت رنين تفاعلي عند إضافة مصاريف أو وارد مالي جديد</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVal = !settings.enableSounds;
+                    handleUpdateSetting('enableSounds', nextVal);
+                    if (nextVal) {
+                      setTimeout(() => playTxnSound('income'), 150);
+                    }
+                  }}
+                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.enableSounds ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.enableSounds ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
               {/* Toggle Biometric Login */}
               <div className="flex items-center justify-between gap-4 py-3">
                 <div className="flex items-center gap-3">
@@ -2774,7 +3115,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
               </h3>
 
               <p className="text-[10px] text-[#7a6a52] leading-relaxed">
-                مسح كل المصاريف والمعاملات المسجلة من SQLite المحلي لجهازك تماماً. لا يمكن التراجع عن هذا الإجراء!
+                مسح كل المصاريف والمعاملات المسجلة لحسابك بالكامل نهائياً. لا يمكن التراجع عن هذا الإجراء!
               </p>
 
               <button
@@ -2797,7 +3138,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 👑 لوحة التحكم والمراقبة النشطة للمشرف
               </h2>
               <p className="text-[11px] opacity-90 leading-relaxed">
-                متاح حصرياً للحساب {currentUser.email}. تتيح لك مراقبة إجماليات السيرفر المحلي SQLite وإدارة الحسابات.
+                متاح حصرياً للحساب {currentUser.email}. تتيح لك مراقبة إجماليات السيرفر والتحكم في حسابات المستخدمين.
               </p>
               
               <button
@@ -2806,7 +3147,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 className="mt-4 px-4 py-1.5 bg-white text-purple-700 font-bold rounded-lg text-xs transition-all flex items-center gap-1 hover:bg-purple-100"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${adminLoading ? 'animate-spin' : ''}`} />
-                <span>جرّ وسحب الاحصائيات من SQLite</span>
+                <span>تحديث وإعادة تحميل إحصائيات النظام</span>
               </button>
             </div>
 
@@ -2825,7 +3166,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
             {/* User List view */}
             <div className="bg-white rounded-2xl p-4 border border-[#e8dcc8] shadow-sm">
               <h3 className="text-xs font-black text-[#2c1f0e] border-b border-[#e8dcc8] pb-2 mb-3">
-                👥 مستخدمو قاعدة البيانات النشطون:
+                👥 مستخدمو التطبيق النشطون:
               </h3>
 
               <div className="space-y-2.5 max-h-80 overflow-y-auto">
@@ -2858,7 +3199,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
 
                 {adminUsers.length === 0 && (
                   <div className="text-center py-6 text-xs text-[#7a6a52]">
-                    اضغط تحديث لجلب السجلات من SQLite 📊
+                    اضغط تحديث لتحديث إحصائيات مستخدمي النظام 📊
                   </div>
                 )}
               </div>

@@ -44,6 +44,8 @@ interface Setting {
   showCharts: number; // 1 or 0
   autoHome: number; // 1 or 0
   confirmDelete: number; // 1 or 0
+  realTimeSync: number; // 1 or 0
+  enableSounds: number; // 1 or 0
 }
 
 interface RecurringBill {
@@ -111,6 +113,60 @@ class JSONDatabase {
 async function startServer() {
   const app = express();
   app.use(express.json());
+
+  // Connection tracking for Real-time Device-to-Device Sync
+  interface SyncClient {
+    id: string;
+    uid: string;
+    res: any;
+  }
+  let syncClients: SyncClient[] = [];
+
+  function notifySyncClients(uid: string) {
+    const clients = syncClients.filter(c => c.uid === uid);
+    console.log(`Broadcasting sync event to ${clients.length} clients for user ${uid}`);
+    clients.forEach(client => {
+      try {
+        client.res.write(`data: ${JSON.stringify({ type: 'sync_required' })}\n\n`);
+      } catch (e) {
+        // Ignored. Client likely disconnected.
+      }
+    });
+  }
+
+  // API - Real-time Device Sync subscription
+  app.get('/api/sync/stream', (req, res) => {
+    const uid = req.query.uid as string;
+    if (!uid) {
+      res.status(400).send('UID is required');
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    const clientId = Math.random().toString(36).substring(2);
+    const newClient = { id: clientId, uid, res };
+    syncClients.push(newClient);
+
+    // Write periodic ping to keep the link alive (e.g. proxy connections)
+    const keepAliveInterval = setInterval(() => {
+      try {
+        res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
+      } catch (err) {
+        // Ignored.
+      }
+    }, 25000);
+
+    req.on('close', () => {
+      clearInterval(keepAliveInterval);
+      syncClients = syncClients.filter(c => c.id !== clientId);
+    });
+
+    res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+  });
 
   // Use JSON file in working directory
   const dbPath = path.join(process.cwd(), 'albait.json');
@@ -200,7 +256,9 @@ async function startServer() {
           showMotivation: 1,
           showCharts: 1,
           autoHome: 1,
-          confirmDelete: 1
+          confirmDelete: 1,
+          realTimeSync: 1,
+          enableSounds: 1
         });
       }
 
@@ -263,7 +321,9 @@ async function startServer() {
                 showMotivation: 1,
                 showCharts: 1,
                 autoHome: 1,
-                confirmDelete: 1
+                confirmDelete: 1,
+                realTimeSync: 1,
+                enableSounds: 1
               });
             }
 
@@ -292,7 +352,9 @@ async function startServer() {
           showMotivation: 1,
           showCharts: 1,
           autoHome: 1,
-          confirmDelete: 1
+          confirmDelete: 1,
+          realTimeSync: 1,
+          enableSounds: 1
         };
         db.settings.push(userSettings);
       }
@@ -351,7 +413,9 @@ async function startServer() {
           showMotivation: 1,
           showCharts: 1,
           autoHome: 1,
-          confirmDelete: 1
+          confirmDelete: 1,
+          realTimeSync: 1,
+          enableSounds: 1
         };
         db.settings.push(userSettings);
       }
@@ -429,6 +493,7 @@ async function startServer() {
       }
 
       await db.save();
+      notifySyncClients(uid);
       const saved = db.transactions.find(tx => tx.id === id);
       res.status(200).json(saved);
     } catch (e: any) {
@@ -449,6 +514,7 @@ async function startServer() {
 
       db.transactions = db.transactions.filter(tx => !(tx.id === id && tx.uid === uid));
       await db.save();
+      notifySyncClients(uid);
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -508,6 +574,7 @@ async function startServer() {
       }
 
       await db.save();
+      notifySyncClients(uid);
       const saved = db.recurring_bills.find(b => b.id === id);
       res.status(200).json(saved);
     } catch (e: any) {
@@ -528,6 +595,7 @@ async function startServer() {
 
       db.recurring_bills = db.recurring_bills.filter(b => !(b.id === id && b.uid === uid));
       await db.save();
+      notifySyncClients(uid);
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -556,7 +624,9 @@ async function startServer() {
           showMotivation: 1,
           showCharts: 1,
           autoHome: 1,
-          confirmDelete: 1
+          confirmDelete: 1,
+          realTimeSync: 1,
+          enableSounds: 1
         };
         db.settings.push(config);
         await db.save();
@@ -582,7 +652,9 @@ async function startServer() {
         showMotivation,
         showCharts,
         autoHome,
-        confirmDelete
+        confirmDelete,
+        realTimeSync,
+        enableSounds
       } = req.body;
 
       if (!uid) {
@@ -593,6 +665,8 @@ async function startServer() {
       const dbShowCharts = showCharts ? 1 : 0;
       const dbAutoHome = autoHome ? 1 : 0;
       const dbConfirmDelete = confirmDelete ? 1 : 0;
+      const dbRealTimeSync = realTimeSync !== undefined ? (realTimeSync ? 1 : 0) : 1;
+      const dbEnableSounds = enableSounds !== undefined ? (enableSounds ? 1 : 0) : 1;
 
       const idx = db.settings.findIndex(s => s.uid === uid);
       const newSettings: Setting = {
@@ -606,7 +680,9 @@ async function startServer() {
         showMotivation: dbShowMotivation,
         showCharts: dbShowCharts,
         autoHome: dbAutoHome,
-        confirmDelete: dbConfirmDelete
+        confirmDelete: dbConfirmDelete,
+        realTimeSync: dbRealTimeSync,
+        enableSounds: dbEnableSounds
       };
 
       if (idx !== -1) {
@@ -616,6 +692,7 @@ async function startServer() {
       }
 
       await db.save();
+      notifySyncClients(uid);
       res.status(200).json(newSettings);
     } catch (e: any) {
       console.error(e);
@@ -676,7 +753,9 @@ async function startServer() {
           showMotivation: settings.showMotivation !== undefined ? (settings.showMotivation ? 1 : 0) : 1,
           showCharts: settings.showCharts !== undefined ? (settings.showCharts ? 1 : 0) : 1,
           autoHome: settings.autoHome !== undefined ? (settings.autoHome ? 1 : 0) : 1,
-          confirmDelete: settings.confirmDelete !== undefined ? (settings.confirmDelete ? 1 : 0) : 1
+          confirmDelete: settings.confirmDelete !== undefined ? (settings.confirmDelete ? 1 : 0) : 1,
+          realTimeSync: settings.realTimeSync !== undefined ? (settings.realTimeSync ? 1 : 0) : 1,
+          enableSounds: settings.enableSounds !== undefined ? (settings.enableSounds ? 1 : 0) : 1
         };
 
         if (idx !== -1) {
@@ -750,6 +829,7 @@ async function startServer() {
 
       db.transactions = db.transactions.filter(tx => tx.uid !== targetUid);
       await db.save();
+      notifySyncClients(targetUid);
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -770,8 +850,13 @@ async function startServer() {
         return res.status(400).json({ error: 'Transaction ID is required' });
       }
 
+      const txnObj = db.transactions.find(tx => tx.id === txnId);
+      const targetUid = txnObj ? txnObj.uid : '';
       db.transactions = db.transactions.filter(tx => tx.id !== txnId);
       await db.save();
+      if (targetUid) {
+        notifySyncClients(targetUid);
+      }
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
