@@ -33,7 +33,9 @@ import {
   ArrowUpDown,
   Lightbulb,
   BarChart3,
-  Home
+  Home,
+  Fingerprint,
+  ScanFace
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -224,6 +226,14 @@ export default function App() {
   const [passcode, setPasscode] = useState('');
   const [isBiometricRegistered, setIsBiometricRegistered] = useState(false);
 
+  // Advanced Biometric login & scanner states
+  const [biometricsLoginEnabled, setBiometricsLoginEnabled] = useState(false);
+  const [showScanOverlay, setShowScanOverlay] = useState(false);
+  const [scanState, setScanState] = useState<'idle' | 'scanning' | 'success' | 'failed'>('idle');
+  const [scanType, setScanType] = useState<'fingerprint' | 'face'>('fingerprint');
+  const [scanProgress, setScanProgress] = useState(0);
+  const [showBiometricPromptModal, setShowBiometricPromptModal] = useState(false);
+
   // Auto rotate motivations
   useEffect(() => {
     const timer = setInterval(() => {
@@ -254,6 +264,10 @@ export default function App() {
     const bioCred = localStorage.getItem('albait_bio_enabled');
     if (bioCred === 'true') {
       setIsBiometricRegistered(true);
+    }
+    const bioLogin = localStorage.getItem('albait_bio_login_enabled');
+    if (bioLogin === 'true') {
+      setBiometricsLoginEnabled(true);
     }
   }, []);
 
@@ -500,6 +514,15 @@ export default function App() {
         await fetchTransactions(profile.uid);
         await fetchRecurringBills(profile.uid);
         triggerToast('أهلاً بك مجدداً 👋');
+
+        // Offer to enable biometric login if not set up yet
+        const hasBioLogin = localStorage.getItem('albait_bio_login_enabled') === 'true';
+        if (!hasBioLogin) {
+          (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
+          setTimeout(() => {
+            setShowBiometricPromptModal(true);
+          }, 1500);
+        }
       } else {
         if (!nameInput) {
           setAuthError('اسم المستخدم مطلوب عند التسجيل');
@@ -536,12 +559,173 @@ export default function App() {
         await fetchTransactions(profile.uid);
         await fetchRecurringBills(profile.uid);
         triggerToast('تم تسجيل حسابك بالنجاح 🎉');
+
+        // Offer to enable biometric login
+        (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
+        setTimeout(() => {
+          setShowBiometricPromptModal(true);
+        }, 1500);
       }
     } catch (err: any) {
       setAuthError(err.message || 'خطأ أثناء المصادقة');
     } finally {
       setAuthLoading(false);
     }
+  };
+
+  // Web Audio synth for futuristic biometric scanning sounds
+  const playBiometricSynthSound = (type: 'success' | 'failure' | 'scan') => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      
+      if (type === 'scan') {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.setValueAtTime(1000, ctx.currentTime);
+        gain.gain.setValueAtTime(0.015, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.05);
+      } else if (type === 'success') {
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain1 = ctx.createGain();
+        const gain2 = ctx.createGain();
+        
+        osc1.connect(gain1);
+        osc2.connect(gain2);
+        gain1.connect(ctx.destination);
+        gain2.connect(ctx.destination);
+        
+        osc1.frequency.setValueAtTime(523.25, ctx.currentTime);
+        osc1.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.25);
+        gain1.gain.setValueAtTime(0.08, ctx.currentTime);
+        gain1.gain.exponentialRampToValueAtTime(0.005, ctx.currentTime + 0.3);
+        
+        osc2.frequency.setValueAtTime(659.25, ctx.currentTime + 0.08);
+        osc2.frequency.exponentialRampToValueAtTime(1046.50, ctx.currentTime + 0.33);
+        gain2.gain.setValueAtTime(0.08, ctx.currentTime + 0.08);
+        gain2.gain.exponentialRampToValueAtTime(0.005, ctx.currentTime + 0.38);
+        
+        osc1.start();
+        osc1.stop(ctx.currentTime + 0.35);
+        osc2.start(ctx.currentTime + 0.08);
+        osc2.stop(ctx.currentTime + 0.4);
+      } else if (type === 'failure') {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.setValueAtTime(120, ctx.currentTime);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.005, ctx.currentTime + 0.35);
+        osc.start();
+        osc.stop(ctx.currentTime + 0.35);
+      }
+    } catch (e) {
+      console.warn("Audio Context init error:", e);
+    }
+  };
+
+  // Launch Advanced Biometric Scan
+  const handleBiometricLoginStart = async (type: 'fingerprint' | 'face' = 'fingerprint') => {
+    const isEnabled = localStorage.getItem('albait_bio_login_enabled') === 'true';
+    const savedUserStr = localStorage.getItem('albait_bio_user');
+
+    if (!isEnabled || !savedUserStr) {
+      triggerToast('يرجى تسجيل الدخول يدويًا أولاً لتفعيل البصمة وبصمة الوجه 📱', true);
+      return;
+    }
+
+    let parsedUser;
+    try {
+      parsedUser = JSON.parse(savedUserStr);
+    } catch (e) {
+      triggerToast('حدث خطأ في ملف البصمة المخزن، يرجى إعادة تسجيل الدخول ❌', true);
+      return;
+    }
+
+    if (!parsedUser || !parsedUser.email || !parsedUser.password) {
+      triggerToast('لا تتوفر بيانات صحيحة، يرجى كتابة كلمة المرور يدويًا ❌', true);
+      return;
+    }
+
+    setScanType(type);
+    setScanState('scanning');
+    setScanProgress(0);
+    setShowScanOverlay(true);
+
+    // Run active scan cycle
+    let prog = 0;
+    const interval = setInterval(() => {
+      prog += 5;
+      if (prog > 100) prog = 100;
+      setScanProgress(prog);
+      
+      // Beep scan indicator click
+      if (prog % 15 === 0) {
+        playBiometricSynthSound('scan');
+      }
+
+      if (prog === 100) {
+        clearInterval(interval);
+        
+        // Success scans!
+        setScanState('success');
+        playBiometricSynthSound('success');
+
+        // Log user in
+        setTimeout(async () => {
+          try {
+            const res = await fetch('/api/user/login', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email: parsedUser.email, password: parsedUser.password })
+            });
+            const data = await res.json();
+            
+            if (!res.ok || !data.success) {
+              setScanState('failed');
+              playBiometricSynthSound('failure');
+              triggerToast(data.error || 'فشلت مطابقة البصمة مع الخادم', true);
+              setTimeout(() => setShowScanOverlay(false), 1500);
+              return;
+            }
+
+            const profile: UserProfile = data.user;
+            localStorage.setItem('albait_user', JSON.stringify(profile));
+            setCurrentUser(profile);
+
+            if (data.settings) {
+              setSettings({
+                ...data.settings,
+                showMotivation: data.settings.showMotivation === 1,
+                showCharts: data.settings.showCharts === 1,
+                autoHome: data.settings.autoHome === 1,
+                confirmDelete: data.settings.confirmDelete === 1
+              });
+              setExpenseCategory(data.settings.defaultCategory);
+              setIncomeSource(data.settings.defaultSource);
+            }
+            await fetchTransactions(profile.uid);
+            await fetchRecurringBills(profile.uid);
+            
+            setShowScanOverlay(false);
+            triggerToast(`تم التحقق ودخول البيت بنجاح! مرحباً ${profile.name} ✨`);
+          } catch (err: any) {
+            setScanState('failed');
+            playBiometricSynthSound('failure');
+            triggerToast(err.message || 'خطأ أثناء تسجيل دخول البصمة السريع', true);
+            setTimeout(() => setShowScanOverlay(false), 1500);
+          }
+        }, 800);
+      }
+    }, 70);
   };
 
   const handleDemoLogin = async () => {
@@ -1472,6 +1656,30 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
             >
               {authLoading ? 'جاري التحقق...' : authMode === 'login' ? 'تأكيد الدخول الحساب ←' : 'تسجيل وتجهيز الحساب الجديد'}
             </button>
+
+            {authMode === 'login' && (
+              <div className="mt-3 pt-3 border-t border-dashed border-[#e8dcc8] flex flex-col gap-2">
+                <span className="text-[10px] text-center text-[#7a6a52] font-bold block">الدخول السريع والآمن بالبصمة</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleBiometricLoginStart('fingerprint')}
+                    className="flex-1 py-2 bg-[#fef9f0] hover:bg-[#efecd7] text-[#0a7c6b] border border-[#e8dcc8] rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    <Fingerprint className="w-4 h-4 text-[#0a7c6b] animate-pulse" />
+                    <span>بصمة الإصبع</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleBiometricLoginStart('face')}
+                    className="flex-1 py-2 bg-[#fef9f0] hover:bg-[#efecd7] text-[#e67e22] border border-[#e8dcc8] rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    <ScanFace className="w-4 h-4 text-[#e67e22]" />
+                    <span>بصمة الوجه</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </form>
 
           {/* Quick Demo Bypass */}
@@ -1538,6 +1746,16 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
           >
             تبديل الحساب / تسجيل خروج
           </button>
+
+          {/* Development & Design Signature */}
+          <div className="mt-6 pt-3 border-t border-[#f7f0e3] text-center">
+            <span className="text-[10px] text-[#a09480] block font-medium">
+              تطوير وتصميم وإعداد الأستاذ
+            </span>
+            <span className="text-xs text-[#0a7c6b] font-black block mt-0.5" style={{ direction: 'ltr' }}>
+              shady nassef 💻🎨
+            </span>
+          </div>
         </div>
       </div>
     );
@@ -2272,7 +2490,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
               </div>
 
               {/* Toggle Auto home routing after entry */}
-              <div className="flex items-center justify-between gap-4 py-3">
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-lg bg-[#ecfdf5] flex items-center justify-center text-[#10b981] shrink-0">
                     <Home className="w-4 h-4" />
@@ -2289,6 +2507,80 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   style={{ direction: 'ltr' }}
                 >
                   <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.autoHome ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              {/* Toggle confirm delete before transaction removal */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center text-red-500 shrink-0">
+                    <Trash2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">تأكيد عملية الحذف</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">السؤال قبل حذف أي معاملة مالية لتفادي الأخطاء</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleUpdateSetting('confirmDelete', !settings.confirmDelete)}
+                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.confirmDelete ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.confirmDelete ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
+
+              {/* Toggle Biometric Login */}
+              <div className="flex items-center justify-between gap-4 py-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-50 flex items-center justify-center text-teal-600 shrink-0">
+                    <Fingerprint className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">بصمة الإصبع وبصمة الوجه</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تسجيل دخول مباشر ومؤمّن وتلقائي</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextVal = !biometricsLoginEnabled;
+                    if (nextVal) {
+                      if (currentUser && currentUser.provider !== 'demo') {
+                        const temp = (window as any)._temp_bio_cred;
+                        if (temp) {
+                          localStorage.setItem('albait_bio_user', JSON.stringify(temp));
+                          localStorage.setItem('albait_bio_login_enabled', 'true');
+                          setBiometricsLoginEnabled(true);
+                          triggerToast('🔒 تم ربط وتفعيل الدخول بالبصمة والوجه بنجاح!');
+                          playBiometricSynthSound('success');
+                        } else {
+                          const p = prompt('يرجى كتابة كلمة المرور الحالية لتأكيد ربط البصمة بالهاتف 🔑:');
+                          if (p) {
+                            const cred = { email: currentUser.email, password: p, name: currentUser.name, uid: currentUser.uid };
+                            localStorage.setItem('albait_bio_user', JSON.stringify(cred));
+                            localStorage.setItem('albait_bio_login_enabled', 'true');
+                            setBiometricsLoginEnabled(true);
+                            triggerToast('🔒 تم ربط وتفعيل الدخول بالبصمة والوجه بنجاح!');
+                            playBiometricSynthSound('success');
+                          }
+                        }
+                      } else {
+                        triggerToast('غير متاح بالوضع التجريبي، يرجى تسجيل الدخول بحساب حقيقي للتفعيل 📱', true);
+                      }
+                    } else {
+                      localStorage.removeItem('albait_bio_user');
+                      localStorage.setItem('albait_bio_login_enabled', 'false');
+                      setBiometricsLoginEnabled(false);
+                      triggerToast('🔓 تم إلغاء تفعيل تسجيل الدخول بالبصمة');
+                      playBiometricSynthSound('failure');
+                    }
+                  }}
+                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${biometricsLoginEnabled ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${biometricsLoginEnabled ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -2575,6 +2867,16 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
           </div>
         )}
 
+        {/* Persistent bottom signature across all pages */}
+        <div className="pt-6 pb-2 text-center border-t border-dashed border-[#e8dcc8] mt-8">
+          <span className="text-[10px] text-[#a09480] font-bold block mb-1">
+            تطوير وتصميم وإعداد الأستاذ
+          </span>
+          <span className="text-xs text-[#0a7c6b] font-black inline-flex items-center justify-center gap-1.5" style={{ direction: 'ltr' }}>
+            shady nassef 💻🎨
+          </span>
+        </div>
+
       </main>
 
       {/* Admin User Details Modal Sheet */}
@@ -2731,6 +3033,128 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
         )}
 
       </nav>
+
+      {/* 1. Biometric Scanning Radar Overlay */}
+      {showScanOverlay && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 text-center">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl relative overflow-hidden">
+            
+            {/* Cancel Scanner */}
+            {scanState === 'scanning' && (
+              <button
+                onClick={() => setShowScanOverlay(false)}
+                className="absolute top-4 left-4 w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 flex items-center justify-center transition-all cursor-pointer border-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+
+            {/* Glowing Tech Accents */}
+            <div className="absolute top-0 right-0 w-32 h-32 bg-teal-500/10 rounded-full blur-3xl pointer-events-none" />
+            <div className="absolute bottom-0 left-0 w-32 h-32 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+
+            <div className="my-8 relative flex flex-col items-center justify-center">
+              {/* Scan box / Target */}
+              <div className="w-32 h-32 rounded-3xl bg-slate-850 border border-slate-700 flex items-center justify-center relative overflow-hidden">
+                
+                {/* Laser line animation */}
+                {scanState === 'scanning' && (
+                  <div className="absolute left-0 right-0 h-1 bg-teal-400 shadow-[0_0_15px_#2dd4bf] animate-[bounce_2s_infinite]" />
+                )}
+
+                {scanType === 'fingerprint' ? (
+                  <Fingerprint className={`w-16 h-16 transition-all duration-300 ${
+                    scanState === 'success' ? 'text-teal-400 scale-110' :
+                    scanState === 'failed' ? 'text-red-500 scale-95' : 'text-slate-400'
+                  }`} />
+                ) : (
+                  <ScanFace className={`w-16 h-16 transition-all duration-300 ${
+                    scanState === 'success' ? 'text-teal-400 scale-110' :
+                    scanState === 'failed' ? 'text-red-500 scale-95' : 'text-slate-400'
+                  }`} />
+                )}
+
+              </div>
+
+              {/* Scan Status Texts */}
+              <h3 className="text-white font-black text-base mt-6">
+                {scanState === 'scanning' && (scanType === 'fingerprint' ? 'جاري قراءة بصمة الإصبع...' : 'جاري فحص ملامح الوجه...')}
+                {scanState === 'success' && 'تم التحقق من الهوية بنجاح! ✅'}
+                {scanState === 'failed' && 'فشلت مطابقة البصمة ⚠️'}
+              </h3>
+              <p className="text-slate-400 text-[11px] mt-1.5 font-bold">
+                {scanState === 'scanning' && 'يرجى وضع إصبعك على مستشعر البصمة أو النظر للكاميرا'}
+                {scanState === 'success' && 'مرحباً بك، جاري دخول البيت السعيد...'}
+                {scanState === 'failed' && 'الرجاء المحاولة مرة أخرى أو استخدام كلمة السر'}
+              </p>
+            </div>
+
+            {/* Progress Meter */}
+            <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden mb-2">
+              <div 
+                className={`h-full transition-all duration-70 ${
+                  scanState === 'success' ? 'bg-teal-400' : 
+                  scanState === 'failed' ? 'bg-red-500' : 'bg-gradient-to-r from-teal-500 to-emerald-400'
+                }`}
+                style={{ width: `${scanProgress}%` }}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[9px] font-bold text-slate-500">
+              <span className="font-mono">{scanProgress}%</span>
+              <span>
+                {scanState === 'scanning' ? 'اتصال مشفّر ومؤمّن 🔒' : scanState === 'success' ? 'تم القبول بنجاح ✅' : 'خطأ بالمطابقة ⚠️'}
+              </span>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* 2. Biometric Enable Prompt Modal */}
+      {showBiometricPromptModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 text-center">
+          <div className="w-full max-w-sm bg-white rounded-2xl p-6 shadow-2xl border border-[#e8dcc8] relative overflow-hidden transition-all">
+            
+            <div className="w-16 h-16 rounded-full bg-[#e0f5f2] border-2 border-[#a8ffec] flex items-center justify-center mx-auto mb-4 animate-bounce">
+              <Fingerprint className="w-8 h-8 text-[#0a7c6b]" />
+            </div>
+
+            <h3 className="text-lg font-black text-[#2c1f0e] mb-2 font-display">تفعيل الدخول السريع بالبصمة 📱🔒</h3>
+            <p className="text-xs text-[#7a6a52] leading-relaxed mb-6 font-semibold">
+              هل ترغب بربط حسابك الحالي ببصمة هاتف هذا الجهاز؟ سيتيح لك هذا تسجيل الدخول بكبسة زر واحدة ومن دون الحاجة لكتابة كلمة المرور في كل مرة!
+            </p>
+
+            <div className="space-y-2">
+              <button
+                onClick={() => {
+                  const temp = (window as any)._temp_bio_cred;
+                  if (temp) {
+                    localStorage.setItem('albait_bio_user', JSON.stringify(temp));
+                    localStorage.setItem('albait_bio_login_enabled', 'true');
+                    setBiometricsLoginEnabled(true);
+                    triggerToast('🔓 تم تفعيل تسجيل الدخول بالبصمة بنجاح!');
+                    playBiometricSynthSound('success');
+                  } else {
+                    triggerToast('حدث خطأ في جلب بيانات الحساب المطلوبة للتفعيل', true);
+                  }
+                  setShowBiometricPromptModal(false);
+                }}
+                className="w-full py-2.5 bg-[#0a7c6b] hover:bg-[#085c4f] text-white rounded-xl text-xs font-black transition-all cursor-pointer shadow-md border-0"
+              >
+                نعم، تفعيل الدخول بالبصمة والوجه 👍
+              </button>
+              
+              <button
+                onClick={() => setShowBiometricPromptModal(false)}
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-all cursor-pointer border-0"
+              >
+                ليس الآن، سأفعلها لاحقاً
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
 
       {/* Styled success/error toast popup notifications */}
       <div

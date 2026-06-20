@@ -3,133 +3,158 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Types
+interface User {
+  uid: string;
+  email: string;
+  name: string;
+  password?: string;
+  lastLogin: number;
+  provider: string;
+  createdAt: number;
+}
+
+interface Transaction {
+  id: string;
+  uid: string;
+  type: string;
+  amount: number;
+  source: string | null;
+  category: string | null;
+  date: string;
+  note: string;
+  createdAt: number;
+  userEmail: string;
+  userName: string;
+}
+
+interface Setting {
+  uid: string;
+  currency: string;
+  cycleStart: number;
+  sortOrder: string;
+  defaultFilter: string;
+  defaultCategory: string;
+  defaultSource: string;
+  showMotivation: number; // 1 or 0
+  showCharts: number; // 1 or 0
+  autoHome: number; // 1 or 0
+  confirmDelete: number; // 1 or 0
+}
+
+interface RecurringBill {
+  id: string;
+  uid: string;
+  title: string;
+  amount: number;
+  category: string;
+  dayOfMonth: number;
+  createdAt: number;
+}
+
+class JSONDatabase {
+  private filePath: string;
+  public users: User[] = [];
+  public transactions: Transaction[] = [];
+  public settings: Setting[] = [];
+  public recurring_bills: RecurringBill[] = [];
+  private lock: Promise<void> = Promise.resolve();
+
+  constructor(filePath: string) {
+    this.filePath = filePath;
+  }
+
+  async init() {
+    console.log(`Initialising JSON database at: ${this.filePath}`);
+    if (fs.existsSync(this.filePath)) {
+      try {
+        const fileContent = await fs.promises.readFile(this.filePath, 'utf-8');
+        const parsed = JSON.parse(fileContent);
+        this.users = parsed.users || [];
+        this.transactions = parsed.transactions || [];
+        this.settings = parsed.settings || [];
+        this.recurring_bills = parsed.recurring_bills || [];
+        console.log(`Successfully loaded JSON database: ${this.users.length} users, ${this.transactions.length} transactions, ${this.settings.length} settings, ${this.recurring_bills.length} recurring_bills`);
+      } catch (err) {
+        console.error('Failed to parse JSON file, starting fresh:', err);
+        await this.save();
+      }
+    } else {
+      await this.save();
+    }
+  }
+
+  async save() {
+    this.lock = this.lock.then(async () => {
+      try {
+        const payload = JSON.stringify({
+          users: this.users,
+          transactions: this.transactions,
+          settings: this.settings,
+          recurring_bills: this.recurring_bills
+        }, null, 2);
+        const tempPath = this.filePath + '.tmp';
+        await fs.promises.writeFile(tempPath, payload, 'utf-8');
+        await fs.promises.rename(tempPath, this.filePath);
+      } catch (err) {
+        console.error('Failed to save JSON Database safely:', err);
+      }
+    });
+    return this.lock;
+  }
+}
 
 async function startServer() {
   const app = express();
   app.use(express.json());
 
-  // Use a relative path for the SQLite database so it stays persistently inside the sandbox
-  const dbPath = path.join(process.cwd(), 'albait.db');
-  console.log(`Initialising SQLite database at: ${dbPath}`);
-
-  const db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database
-  });
-
-  // Enable foreign keys
-  await db.run('PRAGMA foreign_keys = ON');
-
-  // Create tables with correct structures
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      uid TEXT PRIMARY KEY,
-      email TEXT,
-      name TEXT,
-      password TEXT,
-      lastLogin INTEGER,
-      provider TEXT,
-      createdAt INTEGER
-    );
-
-    CREATE TABLE IF NOT EXISTS transactions (
-      id TEXT PRIMARY KEY,
-      uid TEXT,
-      type TEXT, -- 'income' or 'expense'
-      amount REAL,
-      source TEXT, -- for income
-      category TEXT, -- for expense
-      date TEXT,
-      note TEXT,
-      createdAt INTEGER,
-      userEmail TEXT,
-      userName TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS settings (
-      uid TEXT PRIMARY KEY,
-      currency TEXT DEFAULT 'ر.س',
-      cycleStart INTEGER DEFAULT 1,
-      sortOrder TEXT DEFAULT 'desc',
-      defaultFilter TEXT DEFAULT 'all',
-      defaultCategory TEXT DEFAULT 'طعام وشراب',
-      defaultSource TEXT DEFAULT 'راتب',
-      showMotivation INTEGER DEFAULT 1, -- 1 = true, 0 = false
-      showCharts INTEGER DEFAULT 1,
-      autoHome INTEGER DEFAULT 1,
-      confirmDelete INTEGER DEFAULT 1
-    );
-
-    CREATE TABLE IF NOT EXISTS recurring_bills (
-      id TEXT PRIMARY KEY,
-      uid TEXT,
-      title TEXT,
-      amount REAL,
-      category TEXT,
-      dayOfMonth INTEGER DEFAULT 1,
-      createdAt INTEGER
-    );
-  `);
-
-  try {
-    await db.run('ALTER TABLE users ADD COLUMN password TEXT');
-  } catch (err) {
-    // Column already exists, ignore
-  }
+  // Use JSON file in working directory
+  const dbPath = path.join(process.cwd(), 'albait.json');
+  const db = new JSONDatabase(dbPath);
+  await db.init();
 
   // Simple seeding helper for any new user (or user with no transactions)
   async function seedUserTransactions(uid: string, email: string, name: string) {
-    const existing = await db.all('SELECT id FROM transactions WHERE uid = ? LIMIT 1', [uid]);
-    if (existing && existing.length > 0) return; // Already has transactions
+    const hasTransactions = db.transactions.some(tx => tx.uid === uid);
+    if (hasTransactions) return; // Already has transactions
 
     const now = new Date();
     const y = now.getFullYear();
     const m = String(now.getMonth() + 1).padStart(2, '0');
 
-    const demoTxns = [
-      { id: `${uid}_s1`, uid, type: 'income', amount: 12000, source: 'راتب', category: null, date: `${y}-${m}-01`, note: 'راتب الشهر الأساسي', createdAt: Date.now() - 864000000 },
-      { id: `${uid}_e1`, uid, type: 'expense', amount: 850, source: null, category: 'طعام وشراب', date: `${y}-${m}-03`, note: 'مشتريات السوبرماركت الأسبوعية', createdAt: Date.now() - 777600000 },
-      { id: `${uid}_e2`, uid, type: 'expense', amount: 320, source: null, category: 'مواصلات', date: `${y}-${m}-05`, note: 'تعبئة بنزين السيارة', createdAt: Date.now() - 691200000 },
-      { id: `${uid}_e3`, uid, type: 'expense', amount: 450, source: null, category: 'كهرباء ومياه', date: `${y}-${m}-07`, note: 'سداد فاتورة الكهرباء', createdAt: Date.now() - 604800000 },
-      { id: `${uid}_e4`, uid, type: 'expense', amount: 200, source: null, category: 'ترفيه', date: `${y}-${m}-10`, note: 'اشتراكات ترفيهية عائلية', createdAt: Date.now() - 518400000 },
-      { id: `${uid}_e5`, uid, type: 'expense', amount: 1200, source: null, category: 'تعليم', date: `${y}-${m}-12`, note: 'رسوم ومستلزمات دراسية للأطفال', createdAt: Date.now() - 432000000 },
-      { id: `${uid}_s2`, uid, type: 'income', amount: 2000, source: 'مكافأة', category: null, date: `${y}-${m}-15`, note: 'مكافأة الإنجاز السنوية', createdAt: Date.now() - 345600000 },
-      { id: `${uid}_e6`, uid, type: 'expense', amount: 380, source: null, category: 'صحة وطب', date: `${y}-${m}-16`, note: 'فاتورة الصيدلية والاستشارة الطبية', createdAt: Date.now() - 259200000 },
-      { id: `${uid}_e7`, uid, type: 'expense', amount: 600, source: null, category: 'ملابس', date: `${y}-${m}-18`, note: 'ملابس جديدة للموسم الحالي', createdAt: Date.now() - 172800000 },
-      { id: `${uid}_e8`, uid, type: 'expense', amount: 250, source: null, category: 'طعام وشراب', date: `${y}-${m}-20`, note: 'عشاء للمنزل من مطعم', createdAt: Date.now() - 864000 }
+    const demoTxns: Transaction[] = [
+      { id: `${uid}_s1`, uid, type: 'income', amount: 12000, source: 'راتب', category: null, date: `${y}-${m}-01`, note: 'راتب الشهر الأساسي', createdAt: Date.now() - 864000000, userEmail: email, userName: name },
+      { id: `${uid}_e1`, uid, type: 'expense', amount: 850, source: null, category: 'طعام وشراب', date: `${y}-${m}-03`, note: 'مشتريات السوبرماركت الأسبوعية', createdAt: Date.now() - 777600000, userEmail: email, userName: name },
+      { id: `${uid}_e2`, uid, type: 'expense', amount: 320, source: null, category: 'مواصلات', date: `${y}-${m}-05`, note: 'تعبئة بنزين السيارة', createdAt: Date.now() - 691200000, userEmail: email, userName: name },
+      { id: `${uid}_e3`, uid, type: 'expense', amount: 450, source: null, category: 'كهرباء ومياه', date: `${y}-${m}-07`, note: 'سداد فاتورة الكهرباء', createdAt: Date.now() - 604800000, userEmail: email, userName: name },
+      { id: `${uid}_e4`, uid, type: 'expense', amount: 200, source: null, category: 'ترفيه', date: `${y}-${m}-10`, note: 'اشتراكات ترفيهية عائلية', createdAt: Date.now() - 518400000, userEmail: email, userName: name },
+      { id: `${uid}_e5`, uid, type: 'expense', amount: 1200, source: null, category: 'تعليم', date: `${y}-${m}-12`, note: 'رسوم ومستلزمات دراسية للأطفال', createdAt: Date.now() - 432000000, userEmail: email, userName: name },
+      { id: `${uid}_s2`, uid, type: 'income', amount: 2000, source: 'مكافأة', category: null, date: `${y}-${m}-15`, note: 'مكافأة الإنجاز السنوية', createdAt: Date.now() - 345600000, userEmail: email, userName: name },
+      { id: `${uid}_e6`, uid, type: 'expense', amount: 380, source: null, category: 'صحة وطب', date: `${y}-${m}-16`, note: 'فاتورة الصيدلية والاستشارة الطبية', createdAt: Date.now() - 259200000, userEmail: email, userName: name },
+      { id: `${uid}_e7`, uid, type: 'expense', amount: 600, source: null, category: 'ملابس', date: `${y}-${m}-18`, note: 'ملابس جديدة للموسم الحالي', createdAt: Date.now() - 172800000, userEmail: email, userName: name },
+      { id: `${uid}_e8`, uid, type: 'expense', amount: 250, source: null, category: 'طعام وشراب', date: `${y}-${m}-20`, note: 'عشاء للمنزل من مطعم', createdAt: Date.now() - 864000, userEmail: email, userName: name }
     ];
 
-    for (const tx of demoTxns) {
-      await db.run(
-        `INSERT INTO transactions (id, uid, type, amount, source, category, date, note, createdAt, userEmail, userName) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [tx.id, tx.uid, tx.type, tx.amount, tx.source, tx.category, tx.date, tx.note, tx.createdAt, email, name]
-      );
-    }
+    db.transactions.push(...demoTxns);
     console.log(`Seeded default transactions for user: ${uid} (${email})`);
 
     // Seed default recurring bills
-    const rxExisting = await db.all('SELECT id FROM recurring_bills WHERE uid = ? LIMIT 1', [uid]);
-    if (!rxExisting || rxExisting.length === 0) {
-      const defaultBills = [
+    const hasBills = db.recurring_bills.some(b => b.uid === uid);
+    if (!hasBills) {
+      const defaultBills: RecurringBill[] = [
         { id: `${uid}_rb1`, uid, title: 'فاتورة الكهرباء والماء', amount: 350, category: 'كهرباء ومياه', dayOfMonth: 5, createdAt: Date.now() },
         { id: `${uid}_rb2`, uid, title: 'اشتراك الإنترنت المنزلي', amount: 230, category: 'ترفيه', dayOfMonth: 10, createdAt: Date.now() },
         { id: `${uid}_rb3`, uid, title: 'قسط إيجار البيت الثابت', amount: 3000, category: 'أخرى', dayOfMonth: 1, createdAt: Date.now() }
       ];
-      for (const bill of defaultBills) {
-        await db.run(
-          `INSERT INTO recurring_bills (id, uid, title, amount, category, dayOfMonth, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [bill.id, bill.uid, bill.title, bill.amount, bill.category, bill.dayOfMonth, bill.createdAt]
-        );
-      }
+      db.recurring_bills.push(...defaultBills);
       console.log(`Seeded default recurring bills for user: ${uid}`);
     }
+
+    await db.save();
   }
 
   // API - User Register
@@ -144,30 +169,48 @@ async function startServer() {
       const uid = cleanEmail.replace(/[^a-z0-9]/g, '_');
 
       // Check if user already exists
-      const existingUser = await db.get('SELECT uid FROM users WHERE uid = ? OR email = ?', [uid, cleanEmail]);
+      const existingUser = db.users.find(u => u.uid === uid || u.email === cleanEmail);
       if (existingUser) {
         return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل، يرجى تسجيل الدخول بدلاً من ذلك' });
       }
 
-      // Save user with password
-      await db.run(
-        `INSERT INTO users (uid, email, name, password, lastLogin, provider, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [uid, cleanEmail, name.trim(), password, Date.now(), 'email', Date.now()]
-      );
+      // Save user
+      const newUser: User = {
+        uid,
+        email: cleanEmail,
+        name: name.trim(),
+        password,
+        lastLogin: Date.now(),
+        provider: 'email',
+        createdAt: Date.now()
+      };
+      db.users.push(newUser);
 
-      // Create default settings if not exists
-      await db.run(
-        `INSERT OR IGNORE INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-         VALUES (?, 'ر.س', 1, 'desc', 'all', 'طعام وشراب', 'راتب', 1, 1, 1, 1)`,
-        [uid]
-      );
+      // Create settings if not exists
+      const hasSettings = db.settings.some(s => s.uid === uid);
+      if (!hasSettings) {
+        db.settings.push({
+          uid,
+          currency: 'ر.س',
+          cycleStart: 1,
+          sortOrder: 'desc',
+          defaultFilter: 'all',
+          defaultCategory: 'طعام وشراب',
+          defaultSource: 'راتب',
+          showMotivation: 1,
+          showCharts: 1,
+          autoHome: 1,
+          confirmDelete: 1
+        });
+      }
+
+      await db.save();
 
       // Seed setup transactions of the new user
       await seedUserTransactions(uid, cleanEmail, name.trim());
 
-      const userProfile = await db.get('SELECT uid, email, name, provider, lastLogin FROM users WHERE uid = ?', [uid]);
-      const userSettings = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+      const userProfile = db.users.find(u => u.uid === uid);
+      const userSettings = db.settings.find(s => s.uid === uid);
 
       res.status(200).json({ success: true, user: userProfile, settings: userSettings });
     } catch (e: any) {
@@ -187,39 +230,74 @@ async function startServer() {
       const cleanEmail = email.toLowerCase().trim();
       const uid = cleanEmail.replace(/[^a-z0-9]/g, '_');
 
-      const user = await db.get('SELECT * FROM users WHERE email = ? AND password = ?', [cleanEmail, password]);
+      let user = db.users.find(u => u.email === cleanEmail && u.password === password);
       if (!user) {
-        // Special case: if it is the admin and no such user exists, auto-register him for a seamless developer experience!
+        // Special case for admin login
         if (cleanEmail === 'shady.nasif@gmail.com') {
-          // Check if admin exists but password was wrong
-          const anyAdmin = await db.get('SELECT * FROM users WHERE email = ?', [cleanEmail]);
+          const anyAdmin = db.users.find(u => u.email === cleanEmail);
           if (anyAdmin) {
             return res.status(400).json({ error: 'كلمة المرور المدخلة غير صحيحة لحساب الأدمن' });
           } else {
             // Auto register the developer as administrator
-            await db.run(
-              `INSERT INTO users (uid, email, name, password, lastLogin, provider, createdAt)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [uid, cleanEmail, 'Shady Nassef', password, Date.now(), 'email', Date.now()]
-            );
-            await db.run(
-              `INSERT OR IGNORE INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-               VALUES (?, 'ر.س', 1, 'desc', 'all', 'طعام وشراب', 'راتب', 1, 1, 1, 1)`,
-              [uid]
-            );
+            const newAdmin: User = {
+              uid,
+              email: cleanEmail,
+              name: 'Shady Nassef',
+              password,
+              lastLogin: Date.now(),
+              provider: 'email',
+              createdAt: Date.now()
+            };
+            db.users.push(newAdmin);
+
+            const hasSettings = db.settings.some(s => s.uid === uid);
+            if (!hasSettings) {
+              db.settings.push({
+                uid,
+                currency: 'ر.س',
+                cycleStart: 1,
+                sortOrder: 'desc',
+                defaultFilter: 'all',
+                defaultCategory: 'طعام وشراب',
+                defaultSource: 'راتب',
+                showMotivation: 1,
+                showCharts: 1,
+                autoHome: 1,
+                confirmDelete: 1
+              });
+            }
+
+            await db.save();
             await seedUserTransactions(uid, cleanEmail, 'Shady Nassef');
-            
-            const createdAdmin = await db.get('SELECT * FROM users WHERE uid = ?', [uid]);
-            const userSettings = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+
+            const createdAdmin = db.users.find(u => u.uid === uid);
+            const userSettings = db.settings.find(s => s.uid === uid);
             return res.status(200).json({ success: true, user: createdAdmin, settings: userSettings });
           }
         }
         return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة الكود' });
       }
 
-      await db.run('UPDATE users SET lastLogin = ? WHERE uid = ?', [Date.now(), user.uid]);
-      const userSettings = await db.get('SELECT * FROM settings WHERE uid = ?', [user.uid]);
+      user.lastLogin = Date.now();
+      let userSettings = db.settings.find(s => s.uid === user!.uid);
+      if (!userSettings) {
+        userSettings = {
+          uid: user.uid,
+          currency: 'ر.س',
+          cycleStart: 1,
+          sortOrder: 'desc',
+          defaultFilter: 'all',
+          defaultCategory: 'طعام وشراب',
+          defaultSource: 'راتب',
+          showMotivation: 1,
+          showCharts: 1,
+          autoHome: 1,
+          confirmDelete: 1
+        };
+        db.settings.push(userSettings);
+      }
 
+      await db.save();
       res.status(200).json({ success: true, user, settings: userSettings });
     } catch (e: any) {
       console.error(e);
@@ -239,34 +317,54 @@ async function startServer() {
       const cleanName = name || cleanEmail.split('@')[0] || 'مستخدم البيت';
 
       // Insert or update user
-      await db.run(
-        `INSERT INTO users (uid, email, name, lastLogin, provider, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(uid) DO UPDATE SET
-           email = excluded.email,
-           name = excluded.name,
-           lastLogin = excluded.lastLogin,
-           provider = excluded.provider`,
-        [uid, cleanEmail, cleanName, Date.now(), provider || 'email', Date.now()]
-      );
-
-      // Check if user has settings, if not insert default settings
-      const settings = await db.get('SELECT uid FROM settings WHERE uid = ?', [uid]);
-      if (!settings) {
-        await db.run(
-          `INSERT INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-           VALUES (?, 'ر.س', 1, 'desc', 'all', 'طعام وشراب', 'راتب', 1, 1, 1, 1)`,
-          [uid]
-        );
+      const existingUserIdx = db.users.findIndex(u => u.uid === uid);
+      if (existingUserIdx !== -1) {
+        db.users[existingUserIdx] = {
+          ...db.users[existingUserIdx],
+          email: cleanEmail,
+          name: cleanName,
+          lastLogin: Date.now(),
+          provider: provider || 'email'
+        };
+      } else {
+        db.users.push({
+          uid,
+          email: cleanEmail,
+          name: cleanName,
+          lastLogin: Date.now(),
+          provider: provider || 'email',
+          createdAt: Date.now()
+        });
       }
+
+      // Check if user has settings
+      let userSettings = db.settings.find(s => s.uid === uid);
+      if (!userSettings) {
+        userSettings = {
+          uid,
+          currency: 'ر.س',
+          cycleStart: 1,
+          sortOrder: 'desc',
+          defaultFilter: 'all',
+          defaultCategory: 'طعام وشراب',
+          defaultSource: 'راتب',
+          showMotivation: 1,
+          showCharts: 1,
+          autoHome: 1,
+          confirmDelete: 1
+        };
+        db.settings.push(userSettings);
+      }
+
+      await db.save();
 
       // Seed mock transactions the very first time
       await seedUserTransactions(uid, cleanEmail, cleanName);
 
-      const userProfile = await db.get('SELECT * FROM users WHERE uid = ?', [uid]);
-      const userSettings = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+      const userProfile = db.users.find(u => u.uid === uid);
+      const finalSettings = db.settings.find(s => s.uid === uid);
 
-      res.status(200).json({ success: true, user: userProfile, settings: userSettings });
+      res.status(200).json({ success: true, user: userProfile, settings: finalSettings });
     } catch (e: any) {
       console.error(e);
       res.status(500).json({ error: e.message || 'Error syncing user' });
@@ -280,7 +378,9 @@ async function startServer() {
       if (!uid) {
         return res.status(400).json({ error: 'x-user-uid header or uid query parameter is required' });
       }
-      const txs = await db.all('SELECT * FROM transactions WHERE uid = ? ORDER BY date DESC, createdAt DESC', [uid]);
+      const txs = db.transactions
+        .filter(tx => tx.uid === uid)
+        .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
       res.status(200).json(txs);
     } catch (e: any) {
       console.error(e);
@@ -301,24 +401,35 @@ async function startServer() {
         return res.status(400).json({ error: 'Missing required transaction fields' });
       }
 
-      // Check if transaction exists
-      const existing = await db.get('SELECT id FROM transactions WHERE id = ?', [id]);
-      if (existing) {
-        await db.run(
-          `UPDATE transactions SET 
-             type = ?, amount = ?, source = ?, category = ?, date = ?, note = ?
-           WHERE id = ? AND uid = ?`,
-          [type, amount, source, category, date, note, id, uid]
-        );
+      const existingIdx = db.transactions.findIndex(tx => tx.id === id);
+      if (existingIdx !== -1) {
+        db.transactions[existingIdx] = {
+          ...db.transactions[existingIdx],
+          type,
+          amount: parseFloat(amount),
+          source: source || null,
+          category: category || null,
+          date,
+          note: note || ''
+        };
       } else {
-        await db.run(
-          `INSERT INTO transactions (id, uid, type, amount, source, category, date, note, createdAt, userEmail, userName)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [id, uid, type, amount, source, category, date, note, Date.now(), userEmail || '', userName || '']
-        );
+        db.transactions.push({
+          id,
+          uid,
+          type,
+          amount: parseFloat(amount),
+          source: source || null,
+          category: category || null,
+          date,
+          note: note || '',
+          createdAt: Date.now(),
+          userEmail: userEmail || '',
+          userName: userName || ''
+        });
       }
 
-      const saved = await db.get('SELECT * FROM transactions WHERE id = ?', [id]);
+      await db.save();
+      const saved = db.transactions.find(tx => tx.id === id);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
@@ -336,7 +447,8 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header is required' });
       }
 
-      await db.run('DELETE FROM transactions WHERE id = ? AND uid = ?', [id, uid]);
+      db.transactions = db.transactions.filter(tx => !(tx.id === id && tx.uid === uid));
+      await db.save();
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -351,7 +463,9 @@ async function startServer() {
       if (!uid) {
         return res.status(400).json({ error: 'x-user-uid header or uid query parameter is required' });
       }
-      const bills = await db.all('SELECT * FROM recurring_bills WHERE uid = ? ORDER BY dayOfMonth ASC, createdAt DESC', [uid]);
+      const bills = db.recurring_bills
+        .filter(b => b.uid === uid)
+        .sort((a, b) => a.dayOfMonth - b.dayOfMonth || b.createdAt - a.createdAt);
       res.status(200).json(bills);
     } catch (e: any) {
       console.error(e);
@@ -372,23 +486,29 @@ async function startServer() {
         return res.status(400).json({ error: 'Missing required recurring bill fields' });
       }
 
-      const existing = await db.get('SELECT id FROM recurring_bills WHERE id = ?', [id]);
-      if (existing) {
-        await db.run(
-          `UPDATE recurring_bills SET 
-             title = ?, amount = ?, category = ?, dayOfMonth = ?
-           WHERE id = ? AND uid = ?`,
-          [title, amount, category, dayOfMonth || 1, id, uid]
-        );
+      const existingIdx = db.recurring_bills.findIndex(b => b.id === id);
+      if (existingIdx !== -1) {
+        db.recurring_bills[existingIdx] = {
+          ...db.recurring_bills[existingIdx],
+          title,
+          amount: parseFloat(amount),
+          category,
+          dayOfMonth: dayOfMonth || 1
+        };
       } else {
-        await db.run(
-          `INSERT INTO recurring_bills (id, uid, title, amount, category, dayOfMonth, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [id, uid, title, amount, category, dayOfMonth || 1, Date.now()]
-        );
+        db.recurring_bills.push({
+          id,
+          uid,
+          title,
+          amount: parseFloat(amount),
+          category,
+          dayOfMonth: dayOfMonth || 1,
+          createdAt: Date.now()
+        });
       }
 
-      const saved = await db.get('SELECT * FROM recurring_bills WHERE id = ?', [id]);
+      await db.save();
+      const saved = db.recurring_bills.find(b => b.id === id);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
@@ -406,7 +526,8 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header is required' });
       }
 
-      await db.run('DELETE FROM recurring_bills WHERE id = ? AND uid = ?', [id, uid]);
+      db.recurring_bills = db.recurring_bills.filter(b => !(b.id === id && b.uid === uid));
+      await db.save();
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -422,15 +543,23 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header or uid query is required' });
       }
 
-      let config = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+      let config = db.settings.find(s => s.uid === uid);
       if (!config) {
-        // Create matching defaults
-        await db.run(
-          `INSERT INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-           VALUES (?, 'ر.س', 1, 'desc', 'all', 'طعام وشراب', 'راتب', 1, 1, 1, 1)`,
-          [uid]
-        );
-        config = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+        config = {
+          uid,
+          currency: 'ر.س',
+          cycleStart: 1,
+          sortOrder: 'desc',
+          defaultFilter: 'all',
+          defaultCategory: 'طعام وشراب',
+          defaultSource: 'راتب',
+          showMotivation: 1,
+          showCharts: 1,
+          autoHome: 1,
+          confirmDelete: 1
+        };
+        db.settings.push(config);
+        await db.save();
       }
       res.status(200).json(config);
     } catch (e: any) {
@@ -460,50 +589,41 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header is required' });
       }
 
-      // SQLite lacks boolean type, we store as 1 or 0
       const dbShowMotivation = showMotivation ? 1 : 0;
       const dbShowCharts = showCharts ? 1 : 0;
       const dbAutoHome = autoHome ? 1 : 0;
       const dbConfirmDelete = confirmDelete ? 1 : 0;
 
-      await db.run(
-        `INSERT INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(uid) DO UPDATE SET
-           currency = excluded.currency,
-           cycleStart = excluded.cycleStart,
-           sortOrder = excluded.sortOrder,
-           defaultFilter = excluded.defaultFilter,
-           defaultCategory = excluded.defaultCategory,
-           defaultSource = excluded.defaultSource,
-           showMotivation = excluded.showMotivation,
-           showCharts = excluded.showCharts,
-           autoHome = excluded.autoHome,
-           confirmDelete = excluded.confirmDelete`,
-        [
-          uid,
-          currency || 'ر.س',
-          cycleStart || 1,
-          sortOrder || 'desc',
-          defaultFilter || 'all',
-          defaultCategory || 'طعام وشراب',
-          defaultSource || 'راتب',
-          dbShowMotivation,
-          dbShowCharts,
-          dbAutoHome,
-          dbConfirmDelete
-        ]
-      );
+      const idx = db.settings.findIndex(s => s.uid === uid);
+      const newSettings: Setting = {
+        uid,
+        currency: currency || 'ر.س',
+        cycleStart: parseInt(cycleStart) || 1,
+        sortOrder: sortOrder || 'desc',
+        defaultFilter: defaultFilter || 'all',
+        defaultCategory: defaultCategory || 'طعام وشراب',
+        defaultSource: defaultSource || 'راتب',
+        showMotivation: dbShowMotivation,
+        showCharts: dbShowCharts,
+        autoHome: dbAutoHome,
+        confirmDelete: dbConfirmDelete
+      };
 
-      const updated = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
-      res.status(200).json(updated);
+      if (idx !== -1) {
+        db.settings[idx] = newSettings;
+      } else {
+        db.settings.push(newSettings);
+      }
+
+      await db.save();
+      res.status(200).json(newSettings);
     } catch (e: any) {
       console.error(e);
       res.status(500).json({ error: e.message });
     }
   });
 
-  // API - Export SQLite User Bundle to JSON
+  // API - Export JSON User Bundle
   app.get('/api/export', async (req, res) => {
     try {
       const uid = req.headers['x-user-uid'] as string || req.query.uid as string;
@@ -511,13 +631,13 @@ async function startServer() {
         return res.status(400).json({ error: 'User UID is required' });
       }
 
-      const user = await db.get('SELECT * FROM users WHERE uid = ?', [uid]);
-      const txs = await db.all('SELECT * FROM transactions WHERE uid = ?', [uid]);
-      const conf = await db.get('SELECT * FROM settings WHERE uid = ?', [uid]);
+      const user = db.users.find(u => u.uid === uid);
+      const txs = db.transactions.filter(tx => tx.uid === uid);
+      const conf = db.settings.find(s => s.uid === uid);
 
       const bundle = {
         exportedAt: new Date().toISOString(),
-        databaseType: 'SQLite',
+        databaseType: 'JSON',
         user: user || { uid },
         settings: conf || {},
         transactions: txs || []
@@ -532,7 +652,7 @@ async function startServer() {
     }
   });
 
-  // API - Import JSON back into SQLite database
+  // API - Import JSON back into Database
   app.post('/api/import', async (req, res) => {
     try {
       const uid = req.headers['x-user-uid'] as string;
@@ -542,66 +662,54 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header is required' });
       }
 
-      // 1. Restore settings if present
+      // Restore settings
       if (settings) {
-        await db.run(
-          `INSERT INTO settings (uid, currency, cycleStart, sortOrder, defaultFilter, defaultCategory, defaultSource, showMotivation, showCharts, autoHome, confirmDelete)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(uid) DO UPDATE SET
-             currency = excluded.currency,
-             cycleStart = excluded.cycleStart,
-             sortOrder = excluded.sortOrder,
-             defaultFilter = excluded.defaultFilter,
-             defaultCategory = excluded.defaultCategory,
-             defaultSource = excluded.defaultSource,
-             showMotivation = excluded.showMotivation,
-             showCharts = excluded.showCharts,
-             autoHome = excluded.autoHome,
-             confirmDelete = excluded.confirmDelete`,
-          [
-            uid,
-            settings.currency || 'ر.س',
-            settings.cycleStart || 1,
-            settings.sortOrder || 'desc',
-            settings.defaultFilter || 'all',
-            settings.defaultCategory || 'طعام وشراب',
-            settings.defaultSource || 'راتب',
-            settings.showMotivation !== undefined ? settings.showMotivation : 1,
-            settings.showCharts !== undefined ? settings.showCharts : 1,
-            settings.autoHome !== undefined ? settings.autoHome : 1,
-            settings.confirmDelete !== undefined ? settings.confirmDelete : 1
-          ]
-        );
-      }
+        const idx = db.settings.findIndex(s => s.uid === uid);
+        const newSettings: Setting = {
+          uid,
+          currency: settings.currency || 'ر.س',
+          cycleStart: settings.cycleStart || 1,
+          sortOrder: settings.sortOrder || 'desc',
+          defaultFilter: settings.defaultFilter || 'all',
+          defaultCategory: settings.defaultCategory || 'طعام وشراب',
+          defaultSource: settings.defaultSource || 'راتب',
+          showMotivation: settings.showMotivation !== undefined ? (settings.showMotivation ? 1 : 0) : 1,
+          showCharts: settings.showCharts !== undefined ? (settings.showCharts ? 1 : 0) : 1,
+          autoHome: settings.autoHome !== undefined ? (settings.autoHome ? 1 : 0) : 1,
+          confirmDelete: settings.confirmDelete !== undefined ? (settings.confirmDelete ? 1 : 0) : 1
+        };
 
-      // 2. Restore transactions
-      if (Array.isArray(importedTxs)) {
-        // Clear current ones first to replace cleanly
-        await db.run('DELETE FROM transactions WHERE uid = ?', [uid]);
-
-        for (const tx of importedTxs) {
-          // Verify ID or build unique one
-          const txId = tx.id || `${uid}_import_${Math.random().toString(36).substr(2, 9)}`;
-          await db.run(
-            `INSERT OR REPLACE INTO transactions (id, uid, type, amount, source, category, date, note, createdAt, userEmail, userName)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              txId,
-              uid,
-              tx.type || 'expense',
-              tx.amount || 0,
-              tx.source || null,
-              tx.category || null,
-              tx.date || new Date().toISOString().split('T')[0],
-              tx.note || '',
-              tx.createdAt || Date.now(),
-              tx.userEmail || '',
-              tx.userName || ''
-            ]
-          );
+        if (idx !== -1) {
+          db.settings[idx] = newSettings;
+        } else {
+          db.settings.push(newSettings);
         }
       }
 
+      // Restore transactions
+      if (Array.isArray(importedTxs)) {
+        // Clear current ones first
+        db.transactions = db.transactions.filter(tx => tx.uid !== uid);
+
+        for (const tx of importedTxs) {
+          const txId = tx.id || `${uid}_import_${Math.random().toString(36).substring(2, 11)}`;
+          db.transactions.push({
+            id: txId,
+            uid,
+            type: tx.type || 'expense',
+            amount: parseFloat(tx.amount || 0),
+            source: tx.source || null,
+            category: tx.category || null,
+            date: tx.date || new Date().toISOString().split('T')[0],
+            note: tx.note || '',
+            createdAt: tx.createdAt || Date.now(),
+            userEmail: tx.userEmail || '',
+            userName: tx.userName || ''
+          });
+        }
+      }
+
+      await db.save();
       res.status(200).json({ success: true, count: Array.isArray(importedTxs) ? importedTxs.length : 0 });
     } catch (e: any) {
       console.error(e);
@@ -617,15 +725,9 @@ async function startServer() {
         return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة لهذا الحساب' });
       }
 
-      // Grab user records
-      const users = await db.all('SELECT * FROM users');
-      // Grab all transaction aggregates
-      const txs = await db.all('SELECT * FROM transactions');
-
-      // Create stats object
       res.status(200).json({
-        users,
-        transactions: txs
+        users: db.users,
+        transactions: db.transactions
       });
     } catch (e: any) {
       console.error(e);
@@ -646,7 +748,8 @@ async function startServer() {
         return res.status(400).json({ error: 'Target user ID is required' });
       }
 
-      await db.run('DELETE FROM transactions WHERE uid = ?', [targetUid]);
+      db.transactions = db.transactions.filter(tx => tx.uid !== targetUid);
+      await db.save();
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -667,7 +770,8 @@ async function startServer() {
         return res.status(400).json({ error: 'Transaction ID is required' });
       }
 
-      await db.run('DELETE FROM transactions WHERE id = ?', [txnId]);
+      db.transactions = db.transactions.filter(tx => tx.id !== txnId);
+      await db.save();
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
@@ -686,7 +790,6 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     console.log('Running in PRODUCTION mode, serving static client files...');
-    // Serve production assets from the built /dist folder
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
