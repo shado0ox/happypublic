@@ -9,12 +9,12 @@
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/src/assets/images/happy_home_logo_1781910968387.jpg",
+      "src": "/logo_square.jpg",
       "type": "image/jpeg",
       "sizes": "192x192"
     },
     {
-      "src": "/src/assets/images/happy_home_logo_1781910968387.jpg",
+      "src": "/logo.jpg",
       "type": "image/jpeg",
       "sizes": "512x512"
     }

@@ -1,0 +1,12 @@
+# robots.txt for Google Search crawlers
+User-agent: *
+Allow: /
+
+# Prevent indexing of sensitive internal app configurations or temporary files
+Disallow: /config/
+Disallow: /src/db/
+Disallow: /package.json
+Disallow: /package-lock.json
+
+# Sitemap Link
+Sitemap: https://happy-home.xshadox.com/sitemap.xml

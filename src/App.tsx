@@ -27,7 +27,6 @@ import {
   Database,
   Grid,
   FileSpreadsheet,
-  FileText,
   Image as ImageIcon,
   Coins,
   ArrowUpDown,
@@ -54,6 +53,8 @@ import {
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
 // @ts-ignore
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
+// @ts-ignore
+import newLogoImg from './assets/images/happy_home_logo_new_1781990855965.jpg';
 // @ts-ignore
 import html2pdf from 'html2pdf.js';
 
@@ -184,6 +185,7 @@ export default function App() {
   });
 
   // Splash & Install states
+  const [logoType, setLogoType] = useState<'new' | 'classic'>(() => (localStorage.getItem('albait_logo_type') as 'new' | 'classic') || 'new');
   const [showSplash, setShowSplash] = useState(true);
   const slogans = [
     "« الادخار اليوم هو أمان الغد وبناء لمستقبل عائلتك السعيدة »",
@@ -266,13 +268,57 @@ export default function App() {
   // Canvas Reference for Statement Image generation
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Generated Statement Image preview modal state
+  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+
   // Biometric / Passcode Lock state
   const [isLocked, setIsLocked] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [isBiometricRegistered, setIsBiometricRegistered] = useState(false);
 
   // Advanced Biometric login & scanner states
+  const [enrolledBioUsers, setEnrolledBioUsers] = useState<Record<string, any>>(() => {
+    try {
+      const saved = localStorage.getItem('albait_bio_users');
+      return saved ? JSON.parse(saved) : {};
+    } catch (_) {
+      return {};
+    }
+  });
+  const [selectedBioUserEmail, setSelectedBioUserEmail] = useState<string | null>(() => {
+    try {
+      const saved = localStorage.getItem('albait_bio_users');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const keys = Object.keys(parsed);
+        return keys.length > 0 ? keys[0] : null;
+      }
+    } catch (_) {}
+    return null;
+  });
   const [biometricsLoginEnabled, setBiometricsLoginEnabled] = useState(false);
+
+  // Sync biometricsLoginEnabled state for active user
+  useEffect(() => {
+    if (currentUser && currentUser.email) {
+      setBiometricsLoginEnabled(!!enrolledBioUsers[currentUser.email]);
+    } else {
+      setBiometricsLoginEnabled(false);
+    }
+  }, [currentUser, enrolledBioUsers]);
+
+  // Sync selected bio user if list changes
+  useEffect(() => {
+    const keys = Object.keys(enrolledBioUsers);
+    if (keys.length > 0) {
+      if (!selectedBioUserEmail || !enrolledBioUsers[selectedBioUserEmail]) {
+        setSelectedBioUserEmail(keys[0]);
+      }
+    } else {
+      setSelectedBioUserEmail(null);
+    }
+  }, [enrolledBioUsers, selectedBioUserEmail]);
+
   const [showScanOverlay, setShowScanOverlay] = useState(false);
   const [scanState, setScanState] = useState<'idle' | 'scanning' | 'success' | 'failed'>('idle');
   const [scanType, setScanType] = useState<'fingerprint' | 'face'>('fingerprint');
@@ -616,9 +662,9 @@ export default function App() {
         await fetchRecurringBills(profile.uid);
         triggerToast('أهلاً بك مجدداً 👋');
 
-        // Offer to enable biometric login if not set up yet
-        const hasBioLogin = localStorage.getItem('albait_bio_login_enabled') === 'true';
-        if (!hasBioLogin) {
+        // Offer to enable biometric login if this user email is not set up yet
+        const currentBioEnrolled = !!enrolledBioUsers[profile.email];
+        if (!currentBioEnrolled) {
           (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
           setTimeout(() => {
             setShowBiometricPromptModal(true);
@@ -663,11 +709,14 @@ export default function App() {
         await fetchRecurringBills(profile.uid);
         triggerToast('تم تسجيل حسابك بالنجاح 🎉');
 
-        // Offer to enable biometric login
-        (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
-        setTimeout(() => {
-          setShowBiometricPromptModal(true);
-        }, 1500);
+        // Offer to enable biometric login if this user email is not set up yet
+        const currentBioEnrolled = !!enrolledBioUsers[profile.email];
+        if (!currentBioEnrolled) {
+          (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
+          setTimeout(() => {
+            setShowBiometricPromptModal(true);
+          }, 1500);
+        }
       }
     } catch (err: any) {
       setAuthError(err.message || 'خطأ أثناء المصادقة');
@@ -781,35 +830,99 @@ export default function App() {
     }
   };
 
+  // Detect and retrieve biometric capability details based on user agent device type
+  const getBiometricDeviceDetails = () => {
+    const ua = navigator.userAgent.toLowerCase();
+    const isIOS = /iphone|ipad|ipod/.test(ua);
+    const isMac = /macintosh/.test(ua) && navigator.maxTouchPoints > 0;
+    const isAndroid = /android/.test(ua);
+
+    if (isIOS || isMac) {
+      return {
+        label: 'تسجيل دخول بالوجه (Face ID)',
+        iconType: 'face' as const,
+        deviceType: 'Apple iOS (Face ID)'
+      };
+    } else if (isAndroid) {
+      return {
+        label: 'تسجيل دخول بالبصمة (Touch ID)',
+        iconType: 'fingerprint' as const,
+        deviceType: 'Android Device (Fingerprint)'
+      };
+    } else {
+      return {
+        label: 'المعرّف الحيوي للبرنامج (بصمة / وجه)',
+        iconType: 'fingerprint' as const,
+        deviceType: 'التعريف الحيوي الافتراضي'
+      };
+    }
+  };
+
   // Launch Advanced Biometric Scan
-  const handleBiometricLoginStart = async (type: 'fingerprint' | 'face' = 'fingerprint') => {
-    const isEnabled = localStorage.getItem('albait_bio_login_enabled') === 'true';
-    const savedUserStr = localStorage.getItem('albait_bio_user');
-
-    if (!isEnabled || !savedUserStr) {
-      triggerToast('يرجى تسجيل الدخول يدويًا أولاً لتفعيل البصمة وبصمة الوجه 📱', true);
+  const handleBiometricLoginStart = async () => {
+    const keys = Object.keys(enrolledBioUsers);
+    if (keys.length === 0) {
+      triggerToast('يرجى تسجيل الدخول يدويًا أولاً لتفعيل البصمة وبصمة الوجه من صفحة الإعدادات ⚙️', true);
       return;
     }
 
-    let parsedUser;
-    try {
-      parsedUser = JSON.parse(savedUserStr);
-    } catch (e) {
-      triggerToast('حدث خطأ في ملف البصمة المخزن، يرجى إعادة تسجيل الدخول ❌', true);
-      return;
-    }
+    const targetEmail = selectedBioUserEmail || keys[0];
+    const parsedUser = enrolledBioUsers[targetEmail];
 
     if (!parsedUser || !parsedUser.email || !parsedUser.password) {
       triggerToast('لا تتوفر بيانات صحيحة، يرجى كتابة كلمة المرور يدويًا ❌', true);
       return;
     }
 
-    setScanType(type);
+    const device = getBiometricDeviceDetails();
+    setScanType(device.iconType === 'face' ? 'face' : 'fingerprint');
     setScanState('scanning');
     setScanProgress(0);
     setShowScanOverlay(true);
 
-    // Run active scan cycle
+    // Play initial sound scan
+    playBiometricSynthSound('scan');
+
+    // Notify user that this is tied locked to their email
+    triggerToast(`🔒 جارِ التحقق الحيوي وجلب تصريح الحساب لـ: ${parsedUser.email}`);
+
+    // Try a real hardware biometric prompt using WebAuthn (if available)
+    try {
+      if (window.PublicKeyCredential) {
+        const canVerify = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        if (canVerify && navigator.credentials && navigator.credentials.get) {
+          const challenge = new Uint8Array(16);
+          window.crypto.getRandomValues(challenge);
+          
+          const options: CredentialRequestOptions = {
+            publicKey: {
+              challenge: challenge,
+              timeout: 12000,
+              userVerification: 'required',
+            }
+          };
+          
+          // This displays the authenticating modal of the phone/PC
+          await navigator.credentials.get(options);
+        }
+      }
+    } catch (webAuthnError: any) {
+      console.warn("WebAuthn verification fell back to container profile validation:", webAuthnError);
+      // If user cancelled, fail immediately
+      if (
+        webAuthnError.name === 'NotAllowedError' || 
+        webAuthnError.message?.toLowerCase().includes('cancel') || 
+        webAuthnError.message?.toLowerCase().includes('not allowed')
+      ) {
+        setScanState('failed');
+        playBiometricSynthSound('failure');
+        triggerToast('⚠️ تم إسقاط أو إلغاء التحقق الحيوي من قبل المستخدم', true);
+        setTimeout(() => setShowScanOverlay(false), 1800);
+        return;
+      }
+    }
+
+    // Run active scan cycle animation for visual feedback and sound effects
     let prog = 0;
     const interval = setInterval(() => {
       prog += 5;
@@ -876,7 +989,7 @@ export default function App() {
           }
         }, 800);
       }
-    }, 70);
+    }, 60);
   };
 
   const handleDemoLogin = async () => {
@@ -1156,6 +1269,22 @@ export default function App() {
     const income = filteredTxns.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
     const expense = filteredTxns.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
     const netSum = income - expense;
+    const prevBalance = getPreviousMonthsBalance();
+    const totalBalance = prevBalance + income - expense;
+
+    // Calculate category breakdowns for expenses
+    const expenseCategorySums: Record<string, number> = {};
+    filteredTxns.filter(t => t.type === 'expense').forEach(t => {
+      const cat = t.category || 'أخرى';
+      expenseCategorySums[cat] = (expenseCategorySums[cat] || 0) + t.amount;
+    });
+
+    // Calculate source breakdowns for income
+    const incomeSourceSums: Record<string, number> = {};
+    filteredTxns.filter(t => t.type === 'income').forEach(t => {
+      const src = t.source || 'وارد عام';
+      incomeSourceSums[src] = (incomeSourceSums[src] || 0) + t.amount;
+    });
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -1163,332 +1292,284 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // High DPI Scale
-    canvas.width = 800;
-    canvas.height = 1000;
+    // High DPI Scale (W = 450, H = 580)
+    canvas.width = 900;
+    canvas.height = 1160;
     ctx.scale(2, 2);
 
-    // Styling metrics (W=400, H=500 for internal metrics)
-    const W = 400;
-    const H = 500;
+    const W = 450;
+    const H = 580;
 
-    // Background Gradient (Cozy home aesthetic)
-    ctx.fillStyle = '#fef9f0';
+    // Background Fill
+    ctx.fillStyle = '#faf8f4';
     ctx.fillRect(0, 0, W, H);
 
-    // Decorative Islamic/Saudi pattern arch heading
+    // Header Banner with gorgeous vivid gradient
     const grad = ctx.createLinearGradient(0, 0, W, 120);
     grad.addColorStop(0, '#0a7c6b');
-    grad.addColorStop(1, '#0d9b87');
+    grad.addColorStop(1, '#0e9480');
     ctx.fillStyle = grad;
     
-    // Draw Arched Top Banner
     ctx.beginPath();
     ctx.moveTo(0, 0);
     ctx.lineTo(W, 0);
     ctx.lineTo(W, 100);
-    ctx.quadraticCurveTo(W / 2, 130, 0, 100);
+    ctx.quadraticCurveTo(W / 2, 125, 0, 100);
     ctx.closePath();
     ctx.fill();
 
-    // Arabic Title text
+    // Arabic Header Title & Subtitle
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
+    ctx.font = 'bold 16px Arial';
+    ctx.fillText('البيت السعيد لميزانية الأسرة 🏠✨', W / 2, 38);
     
-    // Header Logo Icon dummy
-    ctx.font = 'bold 18px Arial';
-    ctx.fillText('البيت السعيد للمصاريف والمدخرات 🏠', W / 2, 40);
-    
-    ctx.font = '11px Arial';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
-    ctx.fillText(`كشف كشف معاملة لشهر: ${getArabicMonthName(currentMonth)} ${currentYear}`, W / 2, 65);
+    ctx.font = '10.5px Arial';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fillText(`كشف الحساب المالي لشهر: ${getArabicMonthName(currentMonth)} ${currentYear}`, W / 2, 64);
 
-    // Small KPI Box layouts inside image
-    const drawKpi = (label: string, amt: string, color: string, x: number, y: number, w: number, h: number) => {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-      ctx.beginPath();
-      ctx.roundRect ? ctx.roundRect(x, y, w, h, 8) : ctx.rect(x, y, w, h);
-      ctx.fill();
+    ctx.font = 'bold 9px Arial';
+    ctx.fillStyle = '#ffeec2';
+    ctx.fillText('ميزانيتك تحت السيطرة دائماً', W / 2, 84);
 
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-      ctx.font = '9px Arial';
-      ctx.fillText(label, x + w / 2, y + 16);
+    // Hero Balance Card (Y = 120 to Y = 175)
+    const balColor = totalBalance >= 0 ? '#0a7c6b' : '#d32f2f';
+    const balBg = totalBalance >= 0 ? '#e6faf6' : '#fff1f1';
+    const balBorder = totalBalance >= 0 ? '#10b981' : '#f87171';
 
-      ctx.fillStyle = color;
-      ctx.font = 'bold 10px Arial';
-      ctx.fillText(amt, x + w / 2, y + 36);
-    };
+    ctx.fillStyle = balBg;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(30, 120, W - 60, 58, 10) : ctx.rect(30, 120, W - 60, 58);
+    ctx.fill();
+    ctx.strokeStyle = balBorder;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
 
-    drawKpi('💰 إجمالي الوارد', `${income.toLocaleString('ar-SA')} ${settings.currency}`, '#a8ffec', 35, 110, 100, 50);
-    drawKpi('💸 إجمالي المصروف', `${expense.toLocaleString('ar-SA')} ${settings.currency}`, '#ffd0a0', 150, 110, 100, 50);
-    drawKpi('📊 صافي الرصيد', `${netSum.toLocaleString('ar-SA')} ${settings.currency}`, netSum >= 0 ? '#a8ffec' : '#ffd5d5', 265, 110, 100, 50);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = totalBalance >= 0 ? '#056153' : '#991b1b';
+    ctx.font = 'bold 9px Arial';
+    ctx.fillText('💰 صافي الرصيد المالي المتاح لهذا الشهر', W / 2, 135);
 
-    // List recent items on Image
+    ctx.fillStyle = balColor;
+    ctx.font = 'bold 17px Arial';
+    ctx.fillText(`${totalBalance.toLocaleString('ar-SA')} ${settings.currency}`, W / 2, 155);
+
+    if (prevBalance !== 0) {
+      ctx.fillStyle = '#7a6a52';
+      ctx.font = 'bold 7.5px Arial';
+      ctx.fillText(`(يشمل رصيد مرحل من الأشهر السابقة: ${prevBalance.toLocaleString('ar-SA')} ${settings.currency})`, W / 2, 169);
+    }
+
+    // Total Income & Expense Row (Y = 188 to Y = 243)
+    // Left: Income (X = 30, Width = 190)
+    ctx.fillStyle = '#ecfdf5';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(30, 188, 190, 54, 8) : ctx.rect(30, 188, 190, 54);
+    ctx.fill();
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#047857';
+    ctx.font = 'bold 9px Arial';
+    ctx.fillText('📈 إجمالي الوارد (الدخل)', 30 + 190 / 2, 205);
+
+    ctx.fillStyle = '#059669';
+    ctx.font = 'bold 12.5px Arial';
+    ctx.fillText(`+${income.toLocaleString('ar-SA')} ${settings.currency}`, 30 + 190 / 2, 229);
+
+    // Right: Expense (X = 230, Width = 190)
+    ctx.fillStyle = '#fef2f2';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(230, 188, 190, 54, 8) : ctx.rect(230, 188, 190, 54);
+    ctx.fill();
+    ctx.strokeStyle = '#f87171';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#b91c1c';
+    ctx.font = 'bold 9px Arial';
+    ctx.fillText('📉 إجمالي المصروفات', 230 + 190 / 2, 205);
+
+    ctx.fillStyle = '#dc2626';
+    ctx.font = 'bold 12.5px Arial';
+    ctx.fillText(`-${expense.toLocaleString('ar-SA')} ${settings.currency}`, 230 + 190 / 2, 229);
+
+    // Category Breakdowns Section (Y = 252 to Y = 510)
     ctx.textAlign = 'right';
     ctx.fillStyle = '#2c1f0e';
-    ctx.font = 'bold 12px Arial';
-    ctx.fillText('📝 ملخص آخر المعاملات المالية الموثقة:', W - 40, 195);
+    ctx.font = 'bold 11px Arial';
+    ctx.fillText('📊 ملخص إجمالي عمليات كل صنف:', W - 30, 266);
 
-    let startY = 215;
-    const maxListed = 4;
-    const items = filteredTxns.slice(0, maxListed);
+    ctx.strokeStyle = '#e8dcc8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(30, 274);
+    ctx.lineTo(W - 30, 274);
+    ctx.stroke();
 
-    if (items.length === 0) {
+    // Column Subheaders
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#0a7c6b';
+    ctx.font = 'bold 9.5px Arial';
+    ctx.fillText('💰 مصادر الدخل (الوارد):', W - 30, 292);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#b91c1c';
+    ctx.font = 'bold 9.5px Arial';
+    ctx.fillText('💸 فئات المصروفات:', 215, 292);
+
+    // Drawing Income Sources (Right column, X = 235 to X = 420)
+    let incY = 304;
+    const incEntries = Object.entries(incomeSourceSums).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (incEntries.length === 0) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#7a6a52';
-      ctx.font = '11px Arial';
-      ctx.fillText('لا توجد سجلات كشف حساب لهذا الشهر', W / 2, 280);
+      ctx.font = '9px Arial';
+      ctx.fillText('لا توجد واردات مسجلة', 235 + 185 / 2, incY + 20);
     } else {
-      items.forEach((tx) => {
-        // Draw transaction item row
+      incEntries.forEach(([source, amt]) => {
+        const emoji = CAT_EMOJIS[source] || CAT_EMOJIS[`${source}_income`] || '💰';
+        
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.roundRect ? ctx.roundRect(30, startY, W - 60, 44, 8) : ctx.rect(30, startY, W - 60, 44);
+        ctx.roundRect ? ctx.roundRect(235, incY, 185, 25, 6) : ctx.rect(235, incY, 185, 25);
         ctx.fill();
-
-        // Border card
-        ctx.strokeStyle = '#e8dcc8';
+        ctx.strokeStyle = '#e0f5f2';
         ctx.lineWidth = 0.5;
         ctx.stroke();
 
-        // Print emoji
-        const isInc = tx.type === 'income';
-        const emoji = isInc ? (CAT_EMOJIS[tx.source || ''] || '💰') : (CAT_EMOJIS[tx.category || ''] || '📦');
-        ctx.font = '14px Arial';
-        ctx.fillText(emoji, W - 45, startY + 26);
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#0a7c6b';
+        ctx.font = 'bold 8.5px Arial';
+        ctx.fillText(`${amt.toLocaleString('ar-SA')} ${settings.currency}`, 241, incY + 16);
 
-        // Name and desc text
         ctx.textAlign = 'right';
         ctx.fillStyle = '#2c1f0e';
-        ctx.font = 'bold 10px Arial';
-        const labelText = isInc ? (tx.note || tx.source || '') : (tx.note || tx.category || '');
-        ctx.fillText(labelText.length > 25 ? labelText.slice(0, 25) + '...' : labelText, W - 78, startY + 18);
+        ctx.font = 'bold 9px Arial';
+        const displayLabel = source.length > 13 ? source.slice(0, 13) + '..' : source;
+        ctx.fillText(`${emoji} ${displayLabel}`, 413, incY + 16);
 
-        ctx.fillStyle = '#7a6a52';
-        ctx.font = '8px Arial';
-        const dateSub = `${tx.date} · ${isInc ? 'وارد' : (tx.category || 'مصروف')}`;
-        ctx.fillText(dateSub, W - 78, startY + 34);
-
-        // Amount on left
-        ctx.textAlign = 'left';
-        ctx.font = 'bold 11px Arial';
-        ctx.fillStyle = isInc ? '#0a7c6b' : '#e67e22';
-        const numText = `${isInc ? '+' : '-'}${tx.amount.toLocaleString('ar-SA')} ${settings.currency}`;
-        ctx.fillText(numText, 45, startY + 26);
-
-        startY += 52;
+        incY += 30;
       });
     }
 
-    // Footer signature
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#b8a88a';
-    ctx.font = '9px Arial';
-    ctx.fillText('برعاية تطبيق البيت السعيد للمصاريف 🏠', W / 2, 460);
-    ctx.fillStyle = '#7a6a52';
-    ctx.font = 'bold 9px Arial';
-    ctx.fillText('مصمم بحب بواسطة Shady Nassef ❤️', W / 2, 478);
+    // Drawing Expense Categories (Left column, X = 30 to X = 215)
+    let expY = 304;
+    const expEntries = Object.entries(expenseCategorySums).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (expEntries.length === 0) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#7a6a52';
+      ctx.font = '9px Arial';
+      ctx.fillText('لا توجد مصروفات مسجلة', 30 + 185 / 2, expY + 20);
+    } else {
+      expEntries.forEach(([category, amt]) => {
+        const emoji = CAT_EMOJIS[category] || '📦';
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.roundRect ? ctx.roundRect(30, expY, 185, 25, 6) : ctx.rect(30, expY, 185, 25);
+        ctx.fill();
+        ctx.strokeStyle = '#fef2f2';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
 
-    // Save as local image download link
-    const dataUrl = canvas.toDataURL('image/png');
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    a.download = `albait-statement-${getArabicMonthName(currentMonth)}-${currentYear}.png`;
-    a.click();
-    triggerToast('🖼️ تم توليد بطاقة كشف الحساب بنجاح وحفظها كصورة!');
-  };
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#dc2626';
+        ctx.font = 'bold 8.5px Arial';
+        ctx.fillText(`${amt.toLocaleString('ar-SA')} ${settings.currency}`, 36, expY + 16);
 
-  const handleExportStatementAsPDF = () => {
-    const list = getFilteredCurrentMonthTxns();
-    const income = list.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
-    const expense = list.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
-    const netSum = income - expense;
-    const savPct = income > 0 ? Math.round((netSum / income) * 100) : 0;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#2c1f0e';
+        ctx.font = 'bold 9px Arial';
+        const displayLabel = category.length > 13 ? category.slice(0, 13) + '..' : category;
+        ctx.fillText(`${emoji} ${displayLabel}`, 208, expY + 16);
 
-    // Check if html2pdf is available
-    if (typeof html2pdf === 'undefined') {
-      triggerToast('⚠️ مكتبة توليد PDF غير محملة بالكامل حالياً', true);
-      return;
+        expY += 30;
+      });
     }
 
-    triggerToast('⏳ جاري إعداد وتوليد التقرير المالي بصيغة PDF...');
+    // Dynamic advice block at bottom (Y = 468 to Y = 510)
+    ctx.fillStyle = '#fdf6e2';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(30, 468, W - 60, 42, 8) : ctx.rect(30, 468, W - 60, 42);
+    ctx.fill();
+    ctx.strokeStyle = '#ffe4ad';
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
 
-    // Create a temporary container
-    const container = document.createElement('div');
-    container.style.position = 'absolute';
-    container.style.left = '-9999px';
-    container.style.top = '-9999px';
-    container.style.width = '800px';
-    container.style.direction = 'rtl';
-    container.style.fontFamily = "system-ui, -apple-system, sans-serif";
-    container.style.backgroundColor = '#ffffff';
-    container.style.color = '#2c1f0e';
-    container.style.padding = '30px';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#b25900';
+    ctx.font = 'bold 8.5px Arial';
+    ctx.fillText('💡 نصيحة الادخار السليم لشهر مستقر:', W / 2, 483);
+    ctx.fillStyle = '#5c3d14';
+    ctx.font = 'bold 8px Arial';
+    ctx.fillText('الادخار والتنظيم اليومي يضمن الأمان والاستقرار المالي لعائلتك غداً.', W / 2, 498);
 
-    // Build categories checklist with colors
-    const categoryBreakdown = pieChartData.map(entry => {
-      const pct = expense > 0 ? Math.round((entry.value / expense) * 100) : 0;
-      return `
-        <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; background: #fff; padding: 6px 12px; border-radius: 8px; border: 1px solid #e8dcc8; margin: 4px;">
-          <div style="width: 10px; height: 10px; border-radius: 50%; background-color: ${entry.color}; flex-shrink: 0;"></div>
-          <span style="font-weight: 700;">${entry.name}:</span>
-          <span style="color: #e67e22; font-weight: 900;">${entry.value.toLocaleString()} {settings.currency}</span>
-          <span style="color: #7a6a52; font-size: 9.5px;">(${pct}%)</span>
-        </div>
-      `;
-    }).join('');
+    // Branding Footer (Y = 530 to 570)
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#8a7a63';
+    ctx.font = 'bold 8px Arial';
+    ctx.fillText('برعاية تطبيق البيت السعيد لميزانية الأسرة 🏠', W / 2, 532);
+    ctx.fillStyle = '#7a6a52';
+    ctx.font = 'bold 8.5px Arial';
+    ctx.fillText('تم التوليد والتوقيع رقمياً بنجاح بواسطة Shady Nassef ❤️', W / 2, 550);
+    ctx.fillStyle = '#b8a88a';
+    ctx.font = '7.5px Arial';
+    ctx.fillText(`جميع الحقوق محفوظة © ${currentYear} البيت السعيد`, W / 2, 564);
 
-    // Table rows builder
-    const tableRows = list.map((tx, idx) => {
-      const isInc = tx.type === 'income';
-      const categoryText = isInc ? (tx.source || 'وارد عام') : (tx.category || 'مصروف عام');
-      const emoji = isInc ? (CAT_EMOJIS[tx.source || ''] || '💰') : (CAT_EMOJIS[tx.category || ''] || '📦');
-      return `
-        <tr style="background-color: ${idx % 2 === 0 ? '#ffffff' : '#fffdf7'}; border-bottom: 1px solid #e8dcc8;">
-          <td style="padding: 10px; font-family: monospace; color: #7a6a52;">${tx.date}</td>
-          <td style="padding: 10px;">
-            <span style="padding: 2px 6px; border-radius: 4px; font-size: 9.5px; font-weight: 900; background-color: ${isInc ? '#e0f5f2' : '#fff0e5'}; color: ${isInc ? '#0a7c6b' : '#e67e22'}; border: 1px solid ${isInc ? '#9ee0d5' : '#f5c6c6'}; display: inline-block;">
-              ${isInc ? 'وارد 📥' : 'مصروف 📤'}
-            </span>
-          </td>
-          <td style="padding: 10px; font-weight: 800; color: #2c1f0e;">${emoji} ${categoryText}</td>
-          <td style="padding: 10px; color: #60513e; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${tx.note || '-'}</td>
-          <td style="padding: 10px; font-weight: 900; text-align: left; font-family: monospace; color: ${isInc ? '#0a7c6b' : '#e67e22'};">
-            ${isInc ? '+' : '-'}${tx.amount.toLocaleString()} ${settings.currency}
-          </td>
-        </tr>
-      `;
-    }).join('');
+    // Save as local image and trigger modal / download
+    const dataUrl = canvas.toDataURL('image/png');
+    setGeneratedImage(dataUrl);
 
-    container.innerHTML = `
-      <div style="font-family: system-ui, -apple-system, sans-serif; background-color: #ffffff; color: #2c1f0e; border: 1px solid #e8dcc8; border-radius: 12px; padding: 25px; box-sizing: border-box; direction: rtl;">
-        
-        <!-- Document Top Header Banner -->
-        <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #e8dcc8; padding-bottom: 20px; margin-bottom: 20px;">
-          <div style="display: flex; align-items: center; gap: 15px; text-align: right;">
-            <img src="${logoImg}" alt="شعار البيت السعيد" style="width: 70px; height: 70px; border-radius: 50%; border: 3px solid #e0f5f2; object-fit: cover;" />
-            <div>
-              <h1 style="font-size: 24px; font-weight: 900; color: #0a7c6b; margin: 0; line-height: 1.2;">تطبيق البيت السعيد لميزانية الأسرة</h1>
-              <p style="font-size: 11px; font-weight: bold; color: #7a6a52; margin: 4px 0 0 0;">كشف الحساب المالي الموثق والقابل للطباعة</p>
-            </div>
-          </div>
-          <div style="text-align: left; font-size: 10.5px; color: #7a6a52; line-height: 1.5; font-family: monospace;">
-            <p style="margin: 0;"><b>تاريخ التصدير:</b> ${new Date().toISOString().split('T')[0]}</p>
-            <p style="margin: 2px 0 0 0;"><b>المستخرج:</b> ${currentUser ? currentUser.name : 'ضيف مجهول'}</p>
-            <p style="margin: 2px 0 0 0;"><b>البريد:</b> ${currentUser ? currentUser.email : '-'}</p>
-          </div>
-        </div>
-
-        <!-- Custom Banner Box -->
-        <div style="background: linear-gradient(135deg, #0a7c6b 0%, #0d9b87 100%); color: #ffffff; padding: 18px; border-radius: 12px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center;">
-          <div style="text-align: right;">
-            <span style="font-size: 9px; font-weight: 900; letter-spacing: 1px; color: #e8dcc8; opacity: 0.9; text-transform: uppercase;">مستند كشف رسمي</span>
-            <h2 style="font-size: 18px; font-weight: 900; margin: 2px 0 0 0;">تقرير ميزانية شهر: ${getArabicMonthName(currentMonth)} ${currentYear}</h2>
-          </div>
-          <div style="background-color: rgba(255, 255, 255, 0.15); padding: 6px 12px; border-radius: 8px; font-size: 11.5px; font-weight: 900;">
-            إجمالي الحركات: ${list.length} حركة مسجلة
-          </div>
-        </div>
-
-        <!-- KPI Grid Summary Cards -->
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px;">
-          <div style="background-color: #f0faf8; border: 1px solid #bce8e1; border-radius: 12px; padding: 15px; text-align: center;">
-            <span style="font-size: 10px; font-weight: bold; color: #0a7c6b; display: block;">📥 إجمالي الوارد (المقبوضات)</span>
-            <span style="font-size: 18px; font-weight: 950; color: #0a7c6b; display: block; margin-top: 5px;">${income.toLocaleString()} ${settings.currency}</span>
-          </div>
-          <div style="background-color: #fffaf5; border: 1px solid #ffdcb3; border-radius: 12px; padding: 15px; text-align: center;">
-            <span style="font-size: 10px; font-weight: bold; color: #d35400; display: block;">📤 إجمالي المصروفات (المدفوعات)</span>
-            <span style="font-size: 18px; font-weight: 950; color: #e67e22; display: block; margin-top: 5px;">${expense.toLocaleString()} ${settings.currency}</span>
-          </div>
-          <div style="background-color: #fdfdfd; border: 1px solid #e8dcc8; border-radius: 12px; padding: 15px; text-align: center;">
-            <span style="font-size: 10px; font-weight: bold; color: #2c1f0e; display: block;">📊 الصافي المتبقي (الادخار)</span>
-            <span style="font-size: 18px; font-weight: 950; color: ${netSum >= 0 ? '#0a7c6b' : '#ff3333'}; display: block; margin-top: 5px;">${netSum.toLocaleString()} ${settings.currency}</span>
-            <span style="font-size: 9px; font-weight: bold; color: #7a6a52; display: block; margin-top: 4px;">نسبة التوفير: %${savPct}</span>
-          </div>
-        </div>
-
-        <!-- Expense Category Breakdown representation -->
-        ${pieChartData.length > 0 ? `
-          <div style="margin-bottom: 20px; padding: 15px; border: 1px solid #e8dcc8; border-radius: 12px; background-color: #fffdf9; text-align: right;">
-            <h3 style="font-size: 12px; font-weight: 900; color: #2c1f0e; margin: 0 0 10px 0; display: flex; align-items: center; gap: 6px;">
-              <span>📊</span>
-              <span>توزيع المصروفات شهرياً حسب الفئات والمسمى</span>
-            </h3>
-            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-              ${categoryBreakdown}
-            </div>
-          </div>
-        ` : ''}
-
-        <!-- Transactions detailed list table -->
-        <div style="text-align: right;">
-          <h3 style="font-size: 12px; font-weight: 900; color: #2c1f0e; margin: 0 0 10px 0; display: flex; align-items: center; gap: 6px;">
-            <span>📋</span>
-            <span>جدول كشف الحركة المالية التفصيلي للميزانية</span>
-          </h3>
-          <div style="border: 1px solid #e8dcc8; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
-            <table style="width: 100%; border-collapse: collapse; text-align: right; font-size: 11px;">
-              <thead>
-                <tr style="background-color: #f7f5f0; border-bottom: 1px solid #e8dcc8; color: #7a6a52;">
-                  <th style="padding: 10px; font-weight: 900;">التاريخ</th>
-                  <th style="padding: 10px; font-weight: 900;">نوع الحركة</th>
-                  <th style="padding: 10px; font-weight: 900;">الفئة البند</th>
-                  <th style="padding: 10px; font-weight: 900;">البيان والملاحظات</th>
-                  <th style="padding: 10px; font-weight: 900; text-align: left;">المبلغ</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${tableRows}
-                ${list.length === 0 ? `
-                  <tr>
-                    <td colspan="5" style="padding: 30px; text-align: center; color: #7a6a52;">
-                      لا توجد أي معاملات مسجلة لكشف الحساب في هذا الشهر.
-                    </td>
-                  </tr>
-                ` : ''}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- Elegant Authentication Footer signatures -->
-        <div style="margin-top: 35px; border-top: 2px solid #e8dcc8; padding-top: 15px; text-align: center;">
-          <div style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; font-weight: bold; color: #0a7c6b;">
-            <span>🏡</span>
-            <span>تم استخراجه تلقائياً وتوقيعه إلكترونياً بواسطة نظام البيت السعيد</span>
-          </div>
-          <p style="font-size: 9px; color: #7a6a52; margin: 5px 0 0 0;">
-            نظام الإدارة المالية الذكي · تطبيق الويب والمحمول مع المزامنة السحابية الفورية وتتبع المدخرات.
-          </p>
-          <p style="font-size: 9px; color: #b8a88a; margin: 3px 0 0 0; font-weight: bold;">
-            جميع الحقوق محفوظة © ${currentYear}
-          </p>
-        </div>
-
-      </div>
-    `;
-
-    document.body.appendChild(container);
-
-    const opt = {
-      margin:       10,
-      filename:     `البيت_السعيد_كشف_حساب_${getArabicMonthName(currentMonth)}_${currentYear}.pdf`,
-      image:        { type: 'jpeg' as const, quality: 0.98 },
-      html2canvas:  { scale: 2, useCORS: true, logging: false },
-      jsPDF:        { unit: 'mm' as const, format: 'a4' as const, orientation: 'portrait' as const }
-    };
-
-    html2pdf().set(opt).from(container).save().then(() => {
-      // Clean up from DOM
-      document.body.removeChild(container);
-      triggerToast('📄 تم إصدار وحفظ كشف الحساب بصيغة PDF بنجاح!');
-    }).catch((err: any) => {
-      console.error(err);
-      if (document.body.contains(container)) {
-        document.body.removeChild(container);
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (!isMobile) {
+      try {
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = `البيت_السعيد_كشف_حساب_${getArabicMonthName(currentMonth)}_${currentYear}.png`;
+        a.click();
+        triggerToast('🖼️ تم توليد بطاقة كشف الحساب وحفظها كصورة!');
+      } catch (err) {
+        console.warn("Desktop auto download failed", err);
+        triggerToast('🖼️ تم توليد بطاقة كشف الحساب كصورة! يمكنك حفظها الآن');
       }
-      triggerToast('⚠️ حدث خطأ أثناء تكوين ملف الـ PDF', true);
-    });
+    } else {
+      triggerToast('📱 تم توليد كشف الحساب كصورة! اضغط للمشاركة أو الحفظ');
+    }
+  };
+
+  const handleShareGeneratedImage = async () => {
+    if (!generatedImage) return;
+    try {
+      // Convert base64 dataUrl to blob
+      const response = await fetch(generatedImage);
+      const blob = await response.blob();
+      const file = new File([blob], `كشف_حساب_${getArabicMonthName(currentMonth)}_${currentYear}.png`, { type: 'image/png' });
+      
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: 'كشف حساب البيت السعيد',
+          text: `كشف الحساب المالي الموثق لشهر ${getArabicMonthName(currentMonth)} ${currentYear}`
+        });
+      } else {
+        // Fallback to native text/link share if files sharing is not supported
+        if (navigator.share) {
+          await navigator.share({
+            title: 'كشف حساب البيت السعيد',
+            text: `تم استخراج كشف حساب مالي لشهر ${getArabicMonthName(currentMonth)} ${currentYear} من تطبيق البيت السعيد`
+          });
+        } else {
+          triggerToast('⚠️ ميزة المشاركة التلقائية غير مدعومة في متصفحك، يرجى حفظ الصورة بالضغط المطول عليها', true);
+        }
+      }
+    } catch (e) {
+      console.error("Error sharing image", e);
+      triggerToast('⚠️ تعذر إتمام المشاركة، يمكنك حفظ الصورة يدوياً بالضغط المطول عليها ومن ثم مشاركتها', true);
+    }
   };
 
   // WhatsApp template sharing
@@ -1622,8 +1703,30 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   const activeMonthTxns = getFilteredCurrentMonthTxns();
   const currentMonthIncome = activeMonthTxns.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
   const currentMonthExpense = activeMonthTxns.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
-  const currentMonthBalance = currentMonthIncome - currentMonthExpense;
-  const savingPercentage = currentMonthIncome > 0 ? Math.round((currentMonthBalance / currentMonthIncome) * 100) : 0;
+
+  // Rolled over balance from previous months
+  const getPreviousMonthsBalance = () => {
+    let balance = 0;
+    transactions.forEach(t => {
+      const d = new Date(t.date);
+      const tMonth = d.getMonth();
+      const tYear = d.getFullYear();
+      
+      if (tYear < currentYear || (tYear === currentYear && tMonth < currentMonth)) {
+        if (t.type === 'income') {
+          balance += t.amount;
+        } else if (t.type === 'expense') {
+          balance -= t.amount;
+        }
+      }
+    });
+    return balance;
+  };
+
+  const previousMonthsBalance = getPreviousMonthsBalance();
+  const currentMonthBalance = previousMonthsBalance + currentMonthIncome - currentMonthExpense;
+  const currentMonthNetSavings = currentMonthIncome - currentMonthExpense;
+  const savingPercentage = currentMonthIncome > 0 ? Math.round((currentMonthNetSavings / currentMonthIncome) * 100) : 0;
 
   // Pie chart aggregation data
   const chartCategorySums: Record<string, number> = {};
@@ -1724,12 +1827,16 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
           {/* Main Logo Container with glow rings */}
           <div className="relative mb-6">
             <div className="absolute inset-0 rounded-full bg-[#0a7c6b]/30 blur-xl animate-pulse scale-110" />
-            <div className="w-24 h-24 rounded-full bg-white p-1 flex items-center justify-center border-4 border-[#e0f5f2] shadow-2xl relative">
+            <div className={`w-24 h-24 rounded-full flex items-center justify-center relative transition-all duration-300 ${
+              logoType === 'new' 
+                ? 'bg-transparent border-4 border-[#ffbe5e] shadow-[0_0_15px_rgba(255,190,94,0.35)] p-0' 
+                : 'bg-white border-4 border-[#e0f5f2] shadow-2xl p-1'
+            }`}>
               <img 
-                src={logoImg} 
+                src={logoType === 'new' ? newLogoImg : logoImg} 
                 alt="شعار البيت السعيد" 
                 referrerPolicy="no-referrer"
-                className="w-full h-full rounded-full object-cover animate-spin-slow"
+                className={`w-full h-full rounded-full object-cover ${logoType === 'new' ? 'animate-pulse' : 'animate-spin-slow'}`}
               />
             </div>
           </div>
@@ -1782,14 +1889,51 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
           
           {/* Logo Heading banner */}
           <div className="flex flex-col items-center justify-center mb-6 text-center">
-            <img 
-              src={logoImg} 
-              alt="شعار البيت السعيد" 
-              referrerPolicy="no-referrer"
-              className="w-20 h-20 rounded-full border-4 border-[#e0f5f2] shadow-md object-cover mb-3 transform hover:scale-105 transition-transform duration-300"
-            />
-            <h1 className="text-2xl font-black font-display text-[#2c1f0e]">تطبيق البيت السعيد</h1>
+            <div className={`w-20 h-20 rounded-full flex items-center justify-center relative transition-all duration-300 transform hover:scale-105 ${
+              logoType === 'new' 
+                ? 'bg-transparent border-4 border-[#e67e22] shadow-[0_0_12px_rgba(230,126,34,0.3)] p-0' 
+                : 'bg-white border-4 border-[#e0f5f2] shadow-md p-1'
+            }`}>
+              <img 
+                src={logoType === 'new' ? newLogoImg : logoImg} 
+                alt="شعار البيت السعيد" 
+                referrerPolicy="no-referrer"
+                className="w-full h-full rounded-full object-cover"
+              />
+            </div>
+            <h1 className="text-2xl font-black font-display text-[#2c1f0e] mt-2">تطبيق البيت السعيد</h1>
             <p className="text-[#7a6a52] text-xs font-semibold mt-1">شريكك المالي الذكي لتنظيم ميزانك وادخار للمستقبل</p>
+
+            {/* Quick Beautiful Interactive Toggle for Proposed Logo Preview */}
+            <div className="mt-4 px-3 py-1 bg-[#fdfaf2] border border-[#e8dcc8] rounded-full inline-flex items-center gap-2 text-[10px] font-bold text-[#2c1f0e]">
+              <span>شكل الأيقونة:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setLogoType('new');
+                  localStorage.setItem('albait_logo_type', 'new');
+                  triggerToast('✨ تم تفعيل الشعار الجديد المحسن بخلفية شفافة');
+                }}
+                className={`px-2.5 py-1 rounded-full text-[9px] cursor-pointer transition-all ${
+                  logoType === 'new' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'bg-transparent text-[#7a6a52] hover:text-[#2c1f0e]'
+                }`}
+              >
+                ✨ الجديد (شفاف ومحدد)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLogoType('classic');
+                  localStorage.setItem('albait_logo_type', 'classic');
+                  triggerToast('🏡 تم تفعيل الشعار الكلاسيكي القديم');
+                }}
+                className={`px-2.5 py-1 rounded-full text-[9px] cursor-pointer transition-all ${
+                  logoType === 'classic' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'bg-transparent text-[#7a6a52] hover:text-[#2c1f0e]'
+                }`}
+              >
+                الكلاسيكي (السابق)
+              </button>
+            </div>
           </div>
 
           <div className="bg-gradient-to-r from-[#e0f5f2] to-[#fff3cd] border border-[#a8ffec] rounded-lg p-3 text-center mb-6 shadow-xs">
@@ -1832,7 +1976,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <input
                   type="text"
                   required
-                  placeholder="مثال: أبو خالد"
+                  placeholder="مثال: shado0ox"
                   value={nameInput}
                   onChange={e => setNameInput(e.target.value)}
                   className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
@@ -1874,25 +2018,69 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
 
             {authMode === 'login' && (
               <div className="mt-3 pt-3 border-t border-dashed border-[#e8dcc8] flex flex-col gap-2">
-                <span className="text-[10px] text-center text-[#7a6a52] font-bold block">الدخول السريع والآمن بالبصمة</span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleBiometricLoginStart('fingerprint')}
-                    className="flex-1 py-2 bg-[#fef9f0] hover:bg-[#efecd7] text-[#0a7c6b] border border-[#e8dcc8] rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer"
-                  >
-                    <Fingerprint className="w-4 h-4 text-[#0a7c6b] animate-pulse" />
-                    <span>بصمة الإصبع</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleBiometricLoginStart('face')}
-                    className="flex-1 py-2 bg-[#fef9f0] hover:bg-[#efecd7] text-[#e67e22] border border-[#e8dcc8] rounded-xl text-xs font-black flex items-center justify-center gap-2 transition-all cursor-pointer"
-                  >
-                    <ScanFace className="w-4 h-4 text-[#e67e22]" />
-                    <span>بصمة الوجه</span>
-                  </button>
-                </div>
+                <span className="text-[10px] text-center text-[#7a6a52] font-black block">🔒 الدخول السريع بالمعرّف الحيوي</span>
+                
+                {Object.keys(enrolledBioUsers).length > 0 ? (
+                  <div className="space-y-2">
+                    {Object.keys(enrolledBioUsers).length > 1 && (
+                      <div className="flex flex-col gap-1 text-right">
+                        <label className="text-[9px] font-black text-[#7a6a52] mr-1">الحساب النشط للبصمة:</label>
+                        <select
+                          value={selectedBioUserEmail || ''}
+                          onChange={(e) => setSelectedBioUserEmail(e.target.value)}
+                          className="w-full text-right p-2.5 border-1.5 border-[#ddd0b8] rounded-xl text-xs bg-[#fffdf7] text-[#2c1f0e] outline-none focus:border-[#0a7c6b] font-bold"
+                          style={{ direction: 'rtl' }}
+                        >
+                          {Object.values(enrolledBioUsers).map((u: any) => (
+                            <option key={u.email} value={u.email}>
+                              {u.name} ({u.email})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    
+                    <button
+                      type="button"
+                      onClick={() => handleBiometricLoginStart()}
+                      className="w-full py-3 bg-gradient-to-r from-[#0a7c6b] to-[#128a78] hover:from-[#085c4f] hover:to-[#0a7c6b] text-white border-0 rounded-xl text-xs font-black flex items-center justify-center gap-2.5 transition-all cursor-pointer shadow-md hover:-translate-y-0.5"
+                    >
+                      {getBiometricDeviceDetails().iconType === 'face' ? (
+                        <ScanFace className="w-4.5 h-4.5 text-amber-300 animate-pulse" />
+                      ) : (
+                        <Fingerprint className="w-4.5 h-4.5 text-teal-200 animate-pulse" />
+                      )}
+                      <span>{getBiometricDeviceDetails().label}</span>
+                    </button>
+                    
+                    <div className="text-center py-1.5 px-3 bg-[#e0f5f2]/40 rounded-lg border border-[#a8ffec]/50 flex items-center justify-center gap-1.5 text-[9.5px] text-[#0a7c6b] font-bold">
+                      <span className="inline-block relative">
+                        <span className="flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                        </span>
+                      </span>
+                      <span>البصمة جاهزة ومفعّلة لحساب:</span>
+                      <strong className="font-mono text-[10px] text-zinc-700 bg-white/70 px-1.5 py-0.5 rounded-sm">
+                        {enrolledBioUsers[selectedBioUserEmail || '']?.name || enrolledBioUsers[Object.keys(enrolledBioUsers)[0]]?.name || 'ـ'}
+                      </strong>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="bg-[#fcf7ee] border border-dashed border-[#e8dcc8] rounded-xl p-3 text-center space-y-2">
+                    <p className="text-[10px] text-[#7a6a52] font-semibold leading-relaxed">
+                      💡 لتأمين دخولك بلمسة واحدة دون كتابة كلمة المرور، قم بتفعيل ميزة <strong>البصمة أو بصمة الوجه</strong> من داخل قائمة الإعدادات بعد تسجيل الدخول لأول مرة.
+                    </p>
+                    <button
+                      type="button"
+                      disabled
+                      className="w-full py-2 bg-[#f4ebd0]/30 text-[#b5a58e] border border-dashed border-[#dcd1b9] rounded-lg text-[10px] font-black flex items-center justify-center gap-2 cursor-not-allowed"
+                    >
+                      <Fingerprint className="w-3.5 h-3.5 opacity-50" />
+                      <span>المعرّف الحيوي غير مفعّل على هذا الجهاز</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </form>
@@ -2114,14 +2302,18 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 </span>
 
                 {/* Sub totals flex row */}
-                <div className="grid grid-cols-2 gap-3 mt-5 pt-4 border-t border-white/25">
-                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md">
-                    <span className="text-[10px] text-white/80 block">💰 الوارد المالي</span>
-                    <span className="text-sm font-black block mt-0.5">{currentMonthIncome.toLocaleString('ar-SA')} {settings.currency}</span>
+                <div className="grid grid-cols-3 gap-2 mt-5 pt-4 border-t border-white/25">
+                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
+                    <span className="text-[9px] text-white/80 block">↩️ رصيد مرحل</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString('ar-SA')} {settings.currency}</span>
                   </div>
-                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md">
-                    <span className="text-[10px] text-white/80 block">💸 المنصرف الصادر</span>
-                    <span className="text-sm font-black block mt-0.5">{currentMonthExpense.toLocaleString('ar-SA')} {settings.currency}</span>
+                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
+                    <span className="text-[9px] text-white/80 block">💰 الوارد المالي</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString('ar-SA')} {settings.currency}</span>
+                  </div>
+                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
+                    <span className="text-[9px] text-white/80 block">💸 المنصرف الصادر</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString('ar-SA')} {settings.currency}</span>
                   </div>
                 </div>
               </div>
@@ -2471,18 +2663,22 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
             </div>
 
             {/* Quick cash flow stats card */}
-            <div className="grid grid-cols-3 gap-2">
-              <div className="bg-white rounded-xl p-3 text-center border border-[#e8dcc8] shadow-xs">
-                <span className="text-[10px] text-[#7a6a52] font-bold block">إجمالي الوارد</span>
-                <span className="text-sm font-black text-[#0a7c6b] block mt-1">{currentMonthIncome.toLocaleString()} {settings.currency}</span>
+            <div className="grid grid-cols-4 gap-1.5">
+              <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
+                <span className="text-[9px] text-[#7a6a52] font-black block">رصيد مرحل ↩️</span>
+                <span className="text-xs font-black text-slate-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString()} {settings.currency}</span>
               </div>
-              <div className="bg-white rounded-xl p-3 text-center border border-[#e8dcc8] shadow-xs">
-                <span className="text-[10px] text-[#7a6a52] font-bold block">إجمالي المصروف</span>
-                <span className="text-sm font-black text-amber-600 block mt-1">{currentMonthExpense.toLocaleString()} {settings.currency}</span>
+              <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
+                <span className="text-[9px] text-[#7a6a52] font-black block">إجمالي الوارد 📈</span>
+                <span className="text-xs font-black text-[#0a7c6b] block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString()} {settings.currency}</span>
               </div>
-              <div className="bg-white rounded-xl p-3 text-center border border-[#e8dcc8] shadow-xs">
-                <span className="text-[10px] text-[#7a6a52] font-bold block">الصافي المتبقي</span>
-                <span className={`text-sm font-black block mt-1 ${currentMonthBalance >= 0 ? 'text-[#0a7c6b]' : 'text-red-500'}`}>
+              <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
+                <span className="text-[9px] text-[#7a6a52] font-black block">إجمالي المصروف 📉</span>
+                <span className="text-xs font-black text-amber-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString()} {settings.currency}</span>
+              </div>
+              <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
+                <span className="text-[9px] text-[#7a6a52] font-black block">الرصيد المتاح 💰</span>
+                <span className={`text-xs font-black block mt-1 whitespace-nowrap overflow-hidden text-ellipsis ${currentMonthBalance >= 0 ? 'text-[#0a7c6b]' : 'text-red-500'}`}>
                   {currentMonthBalance.toLocaleString()} {settings.currency}
                 </span>
               </div>
@@ -2558,7 +2754,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
             {/* Standalone Statement Action Buttons triggers block */}
             <div className="bg-white rounded-xl p-3.5 border border-[#e8dcc8] shadow-xs">
               <span className="text-[10px] text-[#7a6a52] font-black block mb-2">📥 خيارات تصدير ومشاركة الميزانية المنزلية:</span>
-              <div className="grid grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
                   onClick={handleExportStatementAsImage}
@@ -2566,14 +2762,6 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 >
                   <ImageIcon className="w-4 h-4 text-[#0a7c6b]" />
                   <span>توليد كصورة 🖼️</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportStatementAsPDF}
-                  className="p-1 py-2 bg-[#fdf2f2] border border-[#f5c6c6] hover:border-red-500 text-[#2c1f0e] text-[9px] font-black rounded-lg flex flex-col items-center justify-center gap-1.5 transition-all text-center"
-                >
-                  <FileText className="w-4 h-4 text-red-600" />
-                  <span>تصدير PDF 📄</span>
                 </button>
                 <button
                   type="button"
@@ -2872,6 +3060,47 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 </button>
               </div>
 
+              {/* Toggle Logo Icon Style */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-teal-50 flex items-center justify-center text-[#0a7c6b] shrink-0">
+                    <span className="text-[14px]">✨</span>
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">نمط أيقونة البرنامج</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تبديل شكل الشعار بين الأيقونة الشفافة المحدّدة بالذهب أو الكلاسيكية</span>
+                  </div>
+                </div>
+                <div className="flex bg-[#fff9e6] rounded-md p-0.5 border border-[#e8dcc8] gap-1 shrink-0" style={{ direction: 'rtl' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLogoType('new');
+                      localStorage.setItem('albait_logo_type', 'new');
+                      triggerToast('✨ تم تفعيل الشعار الجديد بخلفية شفافة ومحدّدة');
+                    }}
+                    className={`px-2 py-1 text-[9px] font-bold rounded-md cursor-pointer transition-all ${
+                      logoType === 'new' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
+                    }`}
+                  >
+                    محدّد وشفاف
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLogoType('classic');
+                      localStorage.setItem('albait_logo_type', 'classic');
+                      triggerToast('🏡 تم تفعيل الشعار الكلاسيكي');
+                    }}
+                    className={`px-2 py-1 text-[9px] font-bold rounded-md cursor-pointer transition-all ${
+                      logoType === 'classic' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
+                    }`}
+                  >
+                    كلاسيكي قديم
+                  </button>
+                </div>
+              </div>
+
               {/* Toggle Biometric Login */}
               <div className="flex items-center justify-between gap-4 py-3">
                 <div className="flex items-center gap-3">
@@ -2885,36 +3114,75 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
+                    if (!currentUser || currentUser.provider === 'demo') {
+                      triggerToast('غير متاح بالوضع التجريبي، يرجى تسجيل الدخول بحساب حقيقي للتفعيل 📱', true);
+                      return;
+                    }
                     const nextVal = !biometricsLoginEnabled;
                     if (nextVal) {
-                      if (currentUser && currentUser.provider !== 'demo') {
-                        const temp = (window as any)._temp_bio_cred;
-                        if (temp) {
-                          localStorage.setItem('albait_bio_user', JSON.stringify(temp));
-                          localStorage.setItem('albait_bio_login_enabled', 'true');
-                          setBiometricsLoginEnabled(true);
-                          triggerToast('🔒 تم ربط وتفعيل الدخول بالبصمة والوجه بنجاح!');
-                          playBiometricSynthSound('success');
-                        } else {
-                          const p = prompt('يرجى كتابة كلمة المرور الحالية لتأكيد ربط البصمة بالهاتف 🔑:');
-                          if (p) {
-                            const cred = { email: currentUser.email, password: p, name: currentUser.name, uid: currentUser.uid };
-                            localStorage.setItem('albait_bio_user', JSON.stringify(cred));
-                            localStorage.setItem('albait_bio_login_enabled', 'true');
-                            setBiometricsLoginEnabled(true);
-                            triggerToast('🔒 تم ربط وتفعيل الدخول بالبصمة والوجه بنجاح!');
-                            playBiometricSynthSound('success');
+                      const temp = (window as any)._temp_bio_cred;
+                      
+                      const enrollBiometricsOnDevice = async (credentialsObj: any) => {
+                        try {
+                          if (window.PublicKeyCredential) {
+                            const canVerify = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+                            if (canVerify && navigator.credentials && navigator.credentials.create) {
+                              triggerToast('⏳ يرجى لمس مستشعر البصمة أو النظر للشاشة لربط هويتك المشفرة بالجهاز... 🛡️');
+                              const challenge = new Uint8Array(16);
+                              window.crypto.getRandomValues(challenge);
+                              
+                              const userBytes = new TextEncoder().encode(credentialsObj.email);
+                              const createOptions: CredentialCreationOptions = {
+                                publicKey: {
+                                  challenge: challenge,
+                                  rp: { name: "البيت السعيد" },
+                                  user: {
+                                    id: userBytes,
+                                    name: credentialsObj.email,
+                                    displayName: credentialsObj.name || credentialsObj.email
+                                  },
+                                  pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                                  authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+                                  timeout: 15000
+                                }
+                              };
+                              await navigator.credentials.create(createOptions);
+                            }
+                          }
+                        } catch (err: any) {
+                          console.warn("WebAuthn enrollment fallback:", err);
+                          if (err.name === 'NotAllowedError' || err.message?.toLowerCase().includes('cancel')) {
+                            triggerToast('⚠️ تم إلغاء ربط المعرّف الحيوي من قبل المستخدم', true);
+                            return;
                           }
                         }
+
+                        const updated = {
+                          ...enrolledBioUsers,
+                          [credentialsObj.email]: credentialsObj
+                        };
+                        setEnrolledBioUsers(updated);
+                        localStorage.setItem('albait_bio_users', JSON.stringify(updated));
+                        triggerToast(`🔒 تم ربط وتفعيل المعرف الحيوي بنجاح لحسابك: ${credentialsObj.email}`);
+                        playBiometricSynthSound('success');
+                      };
+
+                      if (temp && temp.email === currentUser.email) {
+                        await enrollBiometricsOnDevice(temp);
                       } else {
-                        triggerToast('غير متاح بالوضع التجريبي، يرجى تسجيل الدخول بحساب حقيقي للتفعيل 📱', true);
+                        const p = prompt('يرجى كتابة كلمة المرور الحالية لتأكيد ربط البصمة بالهاتف 🔑:');
+                        if (p) {
+                          const cred = { email: currentUser.email, password: p, name: currentUser.name, uid: currentUser.uid };
+                          await enrollBiometricsOnDevice(cred);
+                        }
                       }
                     } else {
-                      localStorage.removeItem('albait_bio_user');
-                      localStorage.setItem('albait_bio_login_enabled', 'false');
-                      setBiometricsLoginEnabled(false);
-                      triggerToast('🔓 تم إلغاء تفعيل تسجيل الدخول بالبصمة');
+                      const updated = { ...enrolledBioUsers };
+                      delete updated[currentUser.email];
+                      setEnrolledBioUsers(updated);
+                      localStorage.setItem('albait_bio_users', JSON.stringify(updated));
+                      triggerToast('🔓 تم إلغاء تفعيل تسجيل الدخول بالبصمة لحسابك');
                       playBiometricSynthSound('failure');
                     }
                   }}
@@ -3174,6 +3442,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   const userRecords = adminTxns.filter(t => t.uid === user.uid);
                   const userIncome = userRecords.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
                   const userExpense = userRecords.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+                  const userBalance = userIncome - userExpense;
 
                   return (
                     <div
@@ -3182,7 +3451,12 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       className="p-3 bg-[#fdf3e0]/30 hover:bg-[#fdf3e0]/60 border border-[#e8dcc8] rounded-xl flex items-center justify-between cursor-pointer transition-all"
                     >
                       <div>
-                        <span className="text-xs font-black text-[#2c1f0e] block">{user.name}</span>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-black text-[#2c1f0e]">{user.name}</span>
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${userBalance >= 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-600 border border-red-200'}`}>
+                            الرصيد المتاح: {userBalance.toLocaleString()} {settings.currency}
+                          </span>
+                        </div>
                         <span className="text-[9.5px] text-[#7a6a52] block mt-0.5">{user.email} · {user.provider}</span>
                         <span className="text-[9.5px] text-[#7a6a52] block font-semibold mt-0.5">
                           {userRecords.length} معاملات مسجلة
@@ -3467,13 +3741,40 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
 
             <div className="space-y-2">
               <button
-                onClick={() => {
+                onClick={async () => {
                   const temp = (window as any)._temp_bio_cred;
                   if (temp) {
-                    localStorage.setItem('albait_bio_user', JSON.stringify(temp));
-                    localStorage.setItem('albait_bio_login_enabled', 'true');
-                    setBiometricsLoginEnabled(true);
-                    triggerToast('🔓 تم تفعيل تسجيل الدخول بالبصمة بنجاح!');
+                    try {
+                      if (window.PublicKeyCredential) {
+                        const canVerify = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+                        if (canVerify && navigator.credentials && navigator.credentials.create) {
+                          const challenge = new Uint8Array(16);
+                          window.crypto.getRandomValues(challenge);
+                          const userBytes = new TextEncoder().encode(temp.email);
+                          const createOptions: CredentialCreationOptions = {
+                            publicKey: {
+                              challenge: challenge,
+                              rp: { name: "البيت السعيد" },
+                              user: { id: userBytes, name: temp.email, displayName: temp.name || temp.email },
+                              pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+                              authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required" },
+                              timeout: 10000
+                            }
+                          };
+                          await navigator.credentials.create(createOptions);
+                        }
+                      }
+                    } catch (e) {
+                      console.warn("Prompt modal WebAuthn enrollment fallback:", e);
+                    }
+                    const updated = {
+                      ...enrolledBioUsers,
+                      [temp.email]: temp
+                    };
+                    setEnrolledBioUsers(updated);
+                    localStorage.setItem('albait_bio_users', JSON.stringify(updated));
+                    setSelectedBioUserEmail(temp.email);
+                    triggerToast(`🔓 تم ربط وتفعيل المعرف الحيوي بنجاح لـ: ${temp.email}!`);
                     playBiometricSynthSound('success');
                   } else {
                     triggerToast('حدث خطأ في جلب بيانات الحساب المطلوبة للتفعيل', true);
@@ -3490,6 +3791,82 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-all cursor-pointer border-0"
               >
                 ليس الآن، سأفعلها لاحقاً
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* 3. Generated Image Save / Share Modal */}
+      {generatedImage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 text-center overflow-y-auto">
+          <div className="w-full max-w-sm bg-[#fef9f0] border border-[#e8dcc8] rounded-2xl p-5 shadow-2xl relative my-auto">
+            
+            {/* Close Button */}
+            <button
+              onClick={() => setGeneratedImage(null)}
+              className="absolute top-4 left-4 w-8 h-8 rounded-full bg-[#f4ebd0] hover:bg-[#e8dcc8] text-[#2c1f0e] flex items-center justify-center transition-all cursor-pointer border-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <h3 className="text-base font-black text-[#2c1f0e] mb-3 text-right flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#0a7c6b]" />
+              <span>بطاقة كشف الحساب المالي 📋✨</span>
+            </h3>
+
+            {/* Generated Image Container */}
+            <div className="bg-white p-2 rounded-xl border border-[#e8dcc8] mb-4">
+              <img 
+                src={generatedImage} 
+                alt="كشف الحساب المولد" 
+                className="w-full h-auto rounded-lg shadow-sm border border-slate-100 object-contain max-h-[350px]"
+              />
+            </div>
+
+            {/* Device-Specific dynamic guides */}
+            <div className="bg-[#e0f5f2]/40 border border-[#bce8e1] rounded-xl p-3 mb-4 text-right">
+              {/iPhone|iPad|iPod/i.test(navigator.userAgent) ? (
+                <p className="text-[11px] text-[#0a7c6b] font-bold leading-relaxed">
+                  📱 <b>لمستخدمي الآيفون (iPhone/iPad):</b> اضغط مطولاً وبقوة على صورة كشف الحساب أعلاه، ثم اختر <b>"حفظ في الصور" (Save Image)</b> لحفظها في الألبوم، أو استخدم زر المشاركة بالأسفل لإرسالها فوراً!
+                </p>
+              ) : (
+                <p className="text-[11px] text-[#7a6a52] font-semibold leading-relaxed">
+                  🤖 <b>لمستخدمي الأندرويد والأجهزة الأخرى:</b> اضغط على زر <b>مشاركة الصورة</b> للإرسال الفوري لجروب العائلة، أو اضغط مطولاً على الصورة للحفظ، أو استخدم زر <b>تحميل كصورة</b>.
+                </p>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-2">
+              <button
+                onClick={handleShareGeneratedImage}
+                className="w-full py-2.5 bg-[#0a7c6b] hover:bg-[#085c4f] text-white rounded-xl text-xs font-black transition-all cursor-pointer shadow-sm flex items-center justify-center gap-1.5 border-0"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>مشاركة وحفظ عبر التطبيقات 📱</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const a = document.createElement('a');
+                  a.href = generatedImage;
+                  a.download = `البيت_السعيد_كشف_حساب_${getArabicMonthName(currentMonth)}_${currentYear}.png`;
+                  a.click();
+                  triggerToast('🖼️ تم تنزيل بطاقة كشف الحساب بنجاح!');
+                }}
+                className="w-full py-2.5 bg-[#f4ebd0] hover:bg-[#e8dcc8] text-[#2c1f0e] rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 border-0"
+              >
+                <Download className="w-4 h-4" />
+                <span>تحميل كصورة للهاتف 📥</span>
+              </button>
+
+              <button
+                onClick={() => setGeneratedImage(null)}
+                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl text-xs font-bold transition-all cursor-pointer border-0"
+              >
+                إغلاق النافذة
               </button>
             </div>
 

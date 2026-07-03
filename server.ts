@@ -4,8 +4,12 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+let resolvedDirname = '';
+try {
+  resolvedDirname = __dirname;
+} catch {
+  resolvedDirname = path.dirname(fileURLToPath(import.meta.url));
+}
 
 // Types
 interface User {
@@ -875,7 +879,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     console.log('Running in PRODUCTION mode, serving static client files...');
-    const distPath = path.resolve(__dirname, 'dist');
+    const distPath = path.resolve(resolvedDirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
