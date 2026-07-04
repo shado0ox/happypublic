@@ -20,6 +20,8 @@ interface User {
   lastLogin: number;
   provider: string;
   createdAt: number;
+  token?: string;
+  seeded?: boolean;
 }
 
 interface Transaction {
@@ -50,6 +52,8 @@ interface Setting {
   confirmDelete: number; // 1 or 0
   realTimeSync: number; // 1 or 0
   enableSounds: number; // 1 or 0
+  language?: string;
+  useHijri?: number; // 1 or 0
 }
 
 interface RecurringBill {
@@ -179,42 +183,13 @@ async function startServer() {
 
   // Simple seeding helper for any new user (or user with no transactions)
   async function seedUserTransactions(uid: string, email: string, name: string) {
-    const hasTransactions = db.transactions.some(tx => tx.uid === uid);
-    if (hasTransactions) return; // Already has transactions
-
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-
-    const demoTxns: Transaction[] = [
-      { id: `${uid}_s1`, uid, type: 'income', amount: 12000, source: 'راتب', category: null, date: `${y}-${m}-01`, note: 'راتب الشهر الأساسي', createdAt: Date.now() - 864000000, userEmail: email, userName: name },
-      { id: `${uid}_e1`, uid, type: 'expense', amount: 850, source: null, category: 'طعام وشراب', date: `${y}-${m}-03`, note: 'مشتريات السوبرماركت الأسبوعية', createdAt: Date.now() - 777600000, userEmail: email, userName: name },
-      { id: `${uid}_e2`, uid, type: 'expense', amount: 320, source: null, category: 'مواصلات', date: `${y}-${m}-05`, note: 'تعبئة بنزين السيارة', createdAt: Date.now() - 691200000, userEmail: email, userName: name },
-      { id: `${uid}_e3`, uid, type: 'expense', amount: 450, source: null, category: 'كهرباء ومياه', date: `${y}-${m}-07`, note: 'سداد فاتورة الكهرباء', createdAt: Date.now() - 604800000, userEmail: email, userName: name },
-      { id: `${uid}_e4`, uid, type: 'expense', amount: 200, source: null, category: 'ترفيه', date: `${y}-${m}-10`, note: 'اشتراكات ترفيهية عائلية', createdAt: Date.now() - 518400000, userEmail: email, userName: name },
-      { id: `${uid}_e5`, uid, type: 'expense', amount: 1200, source: null, category: 'تعليم', date: `${y}-${m}-12`, note: 'رسوم ومستلزمات دراسية للأطفال', createdAt: Date.now() - 432000000, userEmail: email, userName: name },
-      { id: `${uid}_s2`, uid, type: 'income', amount: 2000, source: 'مكافأة', category: null, date: `${y}-${m}-15`, note: 'مكافأة الإنجاز السنوية', createdAt: Date.now() - 345600000, userEmail: email, userName: name },
-      { id: `${uid}_e6`, uid, type: 'expense', amount: 380, source: null, category: 'صحة وطب', date: `${y}-${m}-16`, note: 'فاتورة الصيدلية والاستشارة الطبية', createdAt: Date.now() - 259200000, userEmail: email, userName: name },
-      { id: `${uid}_e7`, uid, type: 'expense', amount: 600, source: null, category: 'ملابس', date: `${y}-${m}-18`, note: 'ملابس جديدة للموسم الحالي', createdAt: Date.now() - 172800000, userEmail: email, userName: name },
-      { id: `${uid}_e8`, uid, type: 'expense', amount: 250, source: null, category: 'طعام وشراب', date: `${y}-${m}-20`, note: 'عشاء للمنزل من مطعم', createdAt: Date.now() - 864000, userEmail: email, userName: name }
-    ];
-
-    db.transactions.push(...demoTxns);
-    console.log(`Seeded default transactions for user: ${uid} (${email})`);
-
-    // Seed default recurring bills
-    const hasBills = db.recurring_bills.some(b => b.uid === uid);
-    if (!hasBills) {
-      const defaultBills: RecurringBill[] = [
-        { id: `${uid}_rb1`, uid, title: 'فاتورة الكهرباء والماء', amount: 350, category: 'كهرباء ومياه', dayOfMonth: 5, createdAt: Date.now() },
-        { id: `${uid}_rb2`, uid, title: 'اشتراك الإنترنت المنزلي', amount: 230, category: 'ترفيه', dayOfMonth: 10, createdAt: Date.now() },
-        { id: `${uid}_rb3`, uid, title: 'قسط إيجار البيت الثابت', amount: 3000, category: 'أخرى', dayOfMonth: 1, createdAt: Date.now() }
-      ];
-      db.recurring_bills.push(...defaultBills);
-      console.log(`Seeded default recurring bills for user: ${uid}`);
+    const user = db.users.find(u => u.uid === uid);
+    if (user) {
+      user.seeded = true;
+      await db.save();
     }
-
-    await db.save();
+    // No mock/demo data is seeded per user's requests.
+    return;
   }
 
   // API - User Register
@@ -234,6 +209,8 @@ async function startServer() {
         return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل، يرجى تسجيل الدخول بدلاً من ذلك' });
       }
 
+      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+
       // Save user
       const newUser: User = {
         uid,
@@ -242,7 +219,8 @@ async function startServer() {
         password,
         lastLogin: Date.now(),
         provider: 'email',
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        token: sessionToken
       };
       db.users.push(newUser);
 
@@ -262,7 +240,9 @@ async function startServer() {
           autoHome: 1,
           confirmDelete: 1,
           realTimeSync: 1,
-          enableSounds: 1
+          enableSounds: 1,
+          language: 'ar',
+          useHijri: 1
         });
       }
 
@@ -274,7 +254,7 @@ async function startServer() {
       const userProfile = db.users.find(u => u.uid === uid);
       const userSettings = db.settings.find(s => s.uid === uid);
 
-      res.status(200).json({ success: true, user: userProfile, settings: userSettings });
+      res.status(200).json({ success: true, user: userProfile, settings: userSettings, token: sessionToken, sessionToken });
     } catch (e: any) {
       console.error(e);
       res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الحساب' });
@@ -291,59 +271,65 @@ async function startServer() {
 
       const cleanEmail = email.toLowerCase().trim();
       const uid = cleanEmail.replace(/[^a-z0-9]/g, '_');
+      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
 
-      let user = db.users.find(u => u.email === cleanEmail && u.password === password);
+      const user = db.users.find(u => u.email === cleanEmail && u.password === password);
       if (!user) {
-        // Special case for admin login
-        if (cleanEmail === 'shady.nasif@gmail.com') {
-          const anyAdmin = db.users.find(u => u.email === cleanEmail);
-          if (anyAdmin) {
-            return res.status(400).json({ error: 'كلمة المرور المدخلة غير صحيحة لحساب الأدمن' });
-          } else {
-            // Auto register the developer as administrator
-            const newAdmin: User = {
-              uid,
-              email: cleanEmail,
-              name: 'Shady Nassef',
-              password,
-              lastLogin: Date.now(),
-              provider: 'email',
-              createdAt: Date.now()
-            };
-            db.users.push(newAdmin);
-
-            const hasSettings = db.settings.some(s => s.uid === uid);
-            if (!hasSettings) {
-              db.settings.push({
-                uid,
-                currency: 'ر.س',
-                cycleStart: 1,
-                sortOrder: 'desc',
-                defaultFilter: 'all',
-                defaultCategory: 'طعام وشراب',
-                defaultSource: 'راتب',
-                showMotivation: 1,
-                showCharts: 1,
-                autoHome: 1,
-                confirmDelete: 1,
-                realTimeSync: 1,
-                enableSounds: 1
-              });
-            }
-
-            await db.save();
-            await seedUserTransactions(uid, cleanEmail, 'Shady Nassef');
-
-            const createdAdmin = db.users.find(u => u.uid === uid);
-            const userSettings = db.settings.find(s => s.uid === uid);
-            return res.status(200).json({ success: true, user: createdAdmin, settings: userSettings });
-          }
-        }
-        return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة الكود' });
+        return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
       }
 
       user.lastLogin = Date.now();
+      user.token = sessionToken;
       let userSettings = db.settings.find(s => s.uid === user!.uid);
+      if (!userSettings) {
+        userSettings = {
+          uid: user.uid,
+          currency: 'ر.س',
+          cycleStart: 1,
+          sortOrder: 'desc',
+          defaultFilter: 'all',
+          defaultCategory: 'طعام وشراب',
+          defaultSource: 'راتب',
+          showMotivation: 1,
+          showCharts: 1,
+          autoHome: 1,
+          confirmDelete: 1,
+          realTimeSync: 1,
+          enableSounds: 1,
+          language: 'ar',
+          useHijri: 1
+        };
+        db.settings.push(userSettings);
+      }
+
+      await db.save();
+      res.status(200).json({ success: true, user, settings: userSettings, token: sessionToken, sessionToken });
+    } catch (e: any) {
+      console.error(e);
+      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الدخول' });
+    }
+  });
+
+  // API - Biometric Login with Token
+  app.post('/api/user/login-with-token', async (req, res) => {
+    try {
+      const { email, token } = req.body;
+      if (!email || !token) {
+        return res.status(400).json({ error: 'الرجاء إدخال البريد الإلكتروني والرمز التعريفي' });
+      }
+
+      const cleanEmail = email.toLowerCase().trim();
+      const user = db.users.find(u => u.email === cleanEmail && u.token === token);
+      if (!user) {
+        return res.status(401).json({ error: 'رمز الدخول السريع غير صالح أو منتهي الصلاحية' });
+      }
+
+      user.lastLogin = Date.now();
+      // Rotate token on successful usage for extra security
+      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      user.token = sessionToken;
+
+      let userSettings = db.settings.find(s => s.uid === user.uid);
       if (!userSettings) {
         userSettings = {
           uid: user.uid,
@@ -364,10 +350,10 @@ async function startServer() {
       }
 
       await db.save();
-      res.status(200).json({ success: true, user, settings: userSettings });
+      res.status(200).json({ success: true, user, settings: userSettings, token: sessionToken, sessionToken });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الدخول' });
+      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الدخول بالتوكن' });
     }
   });
 
@@ -419,7 +405,9 @@ async function startServer() {
           autoHome: 1,
           confirmDelete: 1,
           realTimeSync: 1,
-          enableSounds: 1
+          enableSounds: 1,
+          language: 'ar',
+          useHijri: 1
         };
         db.settings.push(userSettings);
       }
@@ -516,7 +504,11 @@ async function startServer() {
         return res.status(400).json({ error: 'x-user-uid header is required' });
       }
 
-      db.transactions = db.transactions.filter(tx => !(tx.id === id && tx.uid === uid));
+      if (id === 'all') {
+        db.transactions = db.transactions.filter(tx => tx.uid !== uid);
+      } else {
+        db.transactions = db.transactions.filter(tx => !(tx.id === id && tx.uid === uid));
+      }
       await db.save();
       notifySyncClients(uid);
       res.status(200).json({ success: true });
@@ -630,7 +622,9 @@ async function startServer() {
           autoHome: 1,
           confirmDelete: 1,
           realTimeSync: 1,
-          enableSounds: 1
+          enableSounds: 1,
+          language: 'ar',
+          useHijri: 1
         };
         db.settings.push(config);
         await db.save();
@@ -658,7 +652,9 @@ async function startServer() {
         autoHome,
         confirmDelete,
         realTimeSync,
-        enableSounds
+        enableSounds,
+        language,
+        useHijri
       } = req.body;
 
       if (!uid) {
@@ -671,6 +667,7 @@ async function startServer() {
       const dbConfirmDelete = confirmDelete ? 1 : 0;
       const dbRealTimeSync = realTimeSync !== undefined ? (realTimeSync ? 1 : 0) : 1;
       const dbEnableSounds = enableSounds !== undefined ? (enableSounds ? 1 : 0) : 1;
+      const dbUseHijri = useHijri !== undefined ? (useHijri ? 1 : 0) : 1;
 
       const idx = db.settings.findIndex(s => s.uid === uid);
       const newSettings: Setting = {
@@ -686,7 +683,9 @@ async function startServer() {
         autoHome: dbAutoHome,
         confirmDelete: dbConfirmDelete,
         realTimeSync: dbRealTimeSync,
-        enableSounds: dbEnableSounds
+        enableSounds: dbEnableSounds,
+        language: language || 'ar',
+        useHijri: dbUseHijri
       };
 
       if (idx !== -1) {
@@ -759,7 +758,9 @@ async function startServer() {
           autoHome: settings.autoHome !== undefined ? (settings.autoHome ? 1 : 0) : 1,
           confirmDelete: settings.confirmDelete !== undefined ? (settings.confirmDelete ? 1 : 0) : 1,
           realTimeSync: settings.realTimeSync !== undefined ? (settings.realTimeSync ? 1 : 0) : 1,
-          enableSounds: settings.enableSounds !== undefined ? (settings.enableSounds ? 1 : 0) : 1
+          enableSounds: settings.enableSounds !== undefined ? (settings.enableSounds ? 1 : 0) : 1,
+          language: settings.language || 'ar',
+          useHijri: settings.useHijri !== undefined ? (settings.useHijri ? 1 : 0) : 1
         };
 
         if (idx !== -1) {
@@ -879,7 +880,7 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     console.log('Running in PRODUCTION mode, serving static client files...');
-    const distPath = path.resolve(resolvedDirname, 'dist');
+    const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));

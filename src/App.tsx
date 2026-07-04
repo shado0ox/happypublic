@@ -1,11 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  translations,
+  CURRENCIES,
+  CAT_COLORS,
+  CAT_EMOJIS,
+  normalizeCategory,
+  normalizeSource,
+  getHijriDateString
+} from './translations';
+import {
   Wallet,
   TrendingUp,
   TrendingDown,
   Calendar,
   PlusCircle,
-  Plus,
   MinusCircle,
   ArrowUpRight,
   ArrowDownRight,
@@ -21,7 +29,6 @@ import {
   ChevronLeft,
   X,
   Sparkles,
-  Info,
   ShieldAlert,
   Sliders,
   Database,
@@ -55,8 +62,6 @@ import SwipeableTransactionItem from './components/SwipeableTransactionItem';
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
 // @ts-ignore
 import newLogoImg from './assets/images/happy_home_logo_new_1781990855965.jpg';
-// @ts-ignore
-import html2pdf from 'html2pdf.js';
 
 // Define TS Interfaces
 interface Transaction {
@@ -106,39 +111,9 @@ interface AppSettings {
   confirmDelete: boolean;
   realTimeSync: boolean;
   enableSounds: boolean;
+  language: string;
+  useHijri: boolean;
 }
-
-// Layout Categories Config
-const CAT_COLORS: Record<string, string> = {
-  "طعام وشراب": "#e74c3c",
-  "مواصلات": "#3498db",
-  "كهرباء ومياه": "#f39c12",
-  "تعليم": "#9b59b6",
-  "صحة وطب": "#27ae60",
-  "ملابس": "#e91e63",
-  "صيانة المنزل": "#ff5722",
-  "ترفيه": "#00bcd4",
-  "أخرى": "#95a5a6",
-  "income": "#0a7c6b"
-};
-
-const CAT_EMOJIS: Record<string, string> = {
-  "طعام وشراب": "🍽️",
-  "مواصلات": "🚗",
-  "كهرباء ومياه": "⚡",
-  "تعليم": "📚",
-  "صحة وطب": "💊",
-  "ملابس": "👗",
-  "صيانة المنزل": "🔧",
-  "ترفيه": "🎮",
-  "أخرى": "📦",
-  "راتب": "💼",
-  "مكافأة": "🎁",
-  "إيجار": "🏠",
-  "استثمار": "📈",
-  "هدية": "🎀",
-  "أخرى_income": "💰"
-};
 
 const MOTIVATIONS = [
   { icon: "💡", text: "درهم وقاية خير من قنطار علاج — كل ريال تدّخره اليوم هو أمان لغدك", quote: "المثل العربي" },
@@ -174,15 +149,31 @@ export default function App() {
     cycleStart: 1,
     sortOrder: 'desc',
     defaultFilter: 'all',
-    defaultCategory: 'طعام وشراب',
-    defaultSource: 'راتب',
+    defaultCategory: 'food',
+    defaultSource: 'salary',
     showMotivation: true,
     showCharts: true,
     autoHome: true,
     confirmDelete: true,
     realTimeSync: true,
-    enableSounds: true
+    enableSounds: true,
+    language: 'ar',
+    useHijri: true
   });
+
+  // Translation function t()
+  const t = (key: string, replacements?: Record<string, any>): string => {
+    const lang = settings.language || 'ar';
+    let text = translations[lang]?.[key] || translations['ar']?.[key] || key;
+    if (replacements) {
+      Object.entries(replacements).forEach(([k, v]) => {
+        text = text.replace(`{${k}}`, String(v));
+      });
+    }
+    return text;
+  };
+  const isRTL = settings.language === 'ar';
+  const currentLocale = settings.language === 'ar' ? 'ar-SA' : 'en-US';
 
   // Splash & Install states
   const [logoType, setLogoType] = useState<'new' | 'classic'>(() => (localStorage.getItem('albait_logo_type') as 'new' | 'classic') || 'new');
@@ -353,6 +344,7 @@ export default function App() {
             const settingsRes = await fetch(`/api/settings`, {
               headers: { 'x-user-uid': currentUser.uid }
             });
+            if (checkAuthStatus(settingsRes.status)) return;
             const fetchedSettings = await settingsRes.json();
             if (fetchedSettings && !fetchedSettings.error) {
               setSettings({
@@ -384,6 +376,94 @@ export default function App() {
     };
   }, [currentUser, settings.realTimeSync]);
 
+  // Helper functions for Offline Synchronization Queue
+  const getPendingOps = (uid: string): any[] => {
+    const raw = localStorage.getItem(`albait_pending_${uid}`);
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch (_) { return []; }
+  };
+
+  const savePendingOps = (uid: string, ops: any[]) => {
+    localStorage.setItem(`albait_pending_${uid}`, JSON.stringify(ops));
+  };
+
+  const addPendingOp = (uid: string, op: { type: string; id: string; payload: any }) => {
+    const ops = getPendingOps(uid);
+    // Remove existing pending operations for the same ID to prevent duplicates
+    const filtered = ops.filter(o => !(o.id === op.id && o.type === op.type));
+    filtered.push(op);
+    savePendingOps(uid, filtered);
+  };
+
+  const processPendingQueue = async (uid: string) => {
+    const ops = getPendingOps(uid);
+    if (ops.length === 0) return true;
+
+    console.log(`Processing ${ops.length} pending offline operations for user: ${uid}...`);
+    const remainingOps = [...ops];
+
+    for (const op of ops) {
+      try {
+        let success = false;
+        if (op.type === 'POST_TX') {
+          const res = await fetch('/api/transactions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-uid': uid
+            },
+            body: JSON.stringify(op.payload)
+          });
+          if (checkAuthStatus(res.status)) return false;
+          success = res.ok;
+        } else if (op.type === 'DELETE_TX') {
+          const res = await fetch(`/api/transactions/${op.id}`, {
+            method: 'DELETE',
+            headers: { 'x-user-uid': uid }
+          });
+          if (checkAuthStatus(res.status)) return false;
+          success = res.ok;
+        } else if (op.type === 'POST_BILL') {
+          const res = await fetch('/api/recurring-bills', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-uid': uid
+            },
+            body: JSON.stringify(op.payload)
+          });
+          if (checkAuthStatus(res.status)) return false;
+          success = res.ok;
+        } else if (op.type === 'DELETE_BILL') {
+          const res = await fetch(`/api/recurring-bills/${op.id}`, {
+            method: 'DELETE',
+            headers: { 'x-user-uid': uid }
+          });
+          if (checkAuthStatus(res.status)) return false;
+          success = res.ok;
+        }
+
+        if (success) {
+          const idx = remainingOps.findIndex(o => o.id === op.id && o.type === op.type);
+          if (idx !== -1) remainingOps.splice(idx, 1);
+        } else {
+          break; // Stop and retry later if server error
+        }
+      } catch (err) {
+        console.warn('Failed to process offline sync operation, will retry:', err);
+        break; // Stop processing due to connection failure
+      }
+    }
+
+    savePendingOps(uid, remainingOps);
+    
+    if (remainingOps.length === 0 && ops.length > 0) {
+      triggerToast('🔄 تم مزامنة العمليات المحفوظة محلياً مع السيرفر بنجاح!');
+      return true;
+    }
+    return remainingOps.length === 0;
+  };
+
   // Quick Check localStorage for session
   useEffect(() => {
     const cachedUser = localStorage.getItem('albait_user');
@@ -393,6 +473,17 @@ export default function App() {
         const parsed = JSON.parse(cachedUser);
         if (parsed && typeof parsed === 'object') {
           setCurrentUser(parsed);
+          
+          // Instantly load cached offline data to prevent visual delay
+          const localTxs = localStorage.getItem(`albait_txs_${parsed.uid}`);
+          if (localTxs) {
+            try { setTransactions(JSON.parse(localTxs)); } catch (_) {}
+          }
+          const localBills = localStorage.getItem(`albait_bills_${parsed.uid}`);
+          if (localBills) {
+            try { setRecurringBills(JSON.parse(localBills)); } catch (_) {}
+          }
+
           syncUserAndFetch(parsed);
           if (cachedLock === 'true') {
             setIsLocked(true);
@@ -407,11 +498,34 @@ export default function App() {
     if (bioCred === 'true') {
       setIsBiometricRegistered(true);
     }
-    const bioLogin = localStorage.getItem('albait_bio_login_enabled');
-    if (bioLogin === 'true') {
-      setBiometricsLoginEnabled(true);
-    }
   }, []);
+
+  // Periodic Sync Interval (Automated fallback synchronization when SSE is blocked/inactive)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // Process pending ops immediately
+    processPendingQueue(currentUser.uid).then(async (allSynced) => {
+      if (allSynced) {
+        await fetchTransactions(currentUser.uid);
+        await fetchRecurringBills(currentUser.uid);
+      }
+    });
+
+    const intervalId = setInterval(async () => {
+      // 1. Process pending offline operations first
+      const allSynced = await processPendingQueue(currentUser.uid);
+
+      // 2. Fallback check for remote updates if no pending offline changes and window/tab is visible
+      if (allSynced && document.visibilityState === 'visible') {
+        console.log('🔄 Checking for remote database updates...');
+        await fetchTransactions(currentUser.uid);
+        await fetchRecurringBills(currentUser.uid);
+      }
+    }, 15000); // Trigger check/pull every 15 seconds
+
+    return () => clearInterval(intervalId);
+  }, [currentUser]);
 
   // Show customized toasts
   const triggerToast = (msg: string, isError = false) => {
@@ -429,6 +543,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(profile)
       });
+      if (checkAuthStatus(res.status)) return;
       const data = await res.json();
       if (data.success) {
         if (data.settings) {
@@ -450,7 +565,6 @@ export default function App() {
       }
     } catch (e) {
       console.error('Error syncing user with backend:', e);
-      // Fallback: fetch offline locally
       triggerToast('تعذر الاتصال بالسيرفر، نعمل في وضع عدم الاتصال مؤقتاً', true);
     }
   };
@@ -460,12 +574,19 @@ export default function App() {
       const res = await fetch(`/api/transactions?uid=${uid}`, {
         headers: { 'x-user-uid': uid }
       });
+      if (checkAuthStatus(res.status)) return;
       const data = await res.json();
       if (Array.isArray(data)) {
         setTransactions(data);
+        localStorage.setItem(`albait_txs_${uid}`, JSON.stringify(data));
       }
     } catch (e) {
       console.error('Error fetching transactions:', e);
+      // Fallback: Read from cache if network is down
+      const localTxs = localStorage.getItem(`albait_txs_${uid}`);
+      if (localTxs) {
+        try { setTransactions(JSON.parse(localTxs)); } catch (_) {}
+      }
     }
   };
 
@@ -474,12 +595,19 @@ export default function App() {
       const res = await fetch(`/api/recurring-bills?uid=${uid}`, {
         headers: { 'x-user-uid': uid }
       });
+      if (checkAuthStatus(res.status)) return;
       const data = await res.json();
       if (Array.isArray(data)) {
         setRecurringBills(data);
+        localStorage.setItem(`albait_bills_${uid}`, JSON.stringify(data));
       }
     } catch (e) {
       console.error('Error fetching recurring bills:', e);
+      // Fallback: Read from cache if network is down
+      const localBills = localStorage.getItem(`albait_bills_${uid}`);
+      if (localBills) {
+        try { setRecurringBills(JSON.parse(localBills)); } catch (_) {}
+      }
     }
   };
 
@@ -498,6 +626,21 @@ export default function App() {
       dayOfMonth: recDay
     };
 
+    // Optimistic UI update and cache writing
+    const newBillItem: RecurringBill = {
+      ...payload,
+      uid: currentUser.uid,
+      createdAt: Date.now()
+    };
+    const updatedBills = [...recurringBills, newBillItem];
+    setRecurringBills(updatedBills);
+    localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills));
+
+    triggerToast('🎉 تم إضافة الفاتورة بنجاح!');
+    setRecTitle('');
+    setRecAmount('');
+    setRecDay(1);
+
     try {
       const res = await fetch('/api/recurring-bills', {
         method: 'POST',
@@ -507,35 +650,39 @@ export default function App() {
         },
         body: JSON.stringify(payload)
       });
+      if (checkAuthStatus(res.status)) return;
       if (res.ok) {
-        triggerToast('🎉 تم إضافة الفاتورة بنجاح!');
-        setRecTitle('');
-        setRecAmount('');
-        setRecDay(1);
         await fetchRecurringBills(currentUser.uid);
       } else {
-        triggerToast('⚠️ فشل حفظ الفاتورة المتكررة', true);
+        addPendingOp(currentUser.uid, { type: 'POST_BILL', id: payload.id, payload });
       }
     } catch (e) {
-      triggerToast('⚠️ تعذر إرسال البيانات للسيرفر', true);
+      addPendingOp(currentUser.uid, { type: 'POST_BILL', id: payload.id, payload });
     }
   };
 
   const handleDeleteRecurringBill = async (id: string) => {
     if (!currentUser) return;
+
+    // Optimistic UI update and cache writing
+    const updatedBills = recurringBills.filter(b => b.id !== id);
+    setRecurringBills(updatedBills);
+    localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills));
+    triggerToast('🗑️ تم إزالة الفاتورة المتكررة بنجاح');
+
     try {
       const res = await fetch(`/api/recurring-bills/${id}`, {
         method: 'DELETE',
         headers: { 'x-user-uid': currentUser.uid }
       });
+      if (checkAuthStatus(res.status)) return;
       if (res.ok) {
-        triggerToast('🗑️ تم إزالة الفاتورة المتكررة بنجاح');
         await fetchRecurringBills(currentUser.uid);
       } else {
-        triggerToast('⚠️ فشل مسح الفاتورة المتكررة', true);
+        addPendingOp(currentUser.uid, { type: 'DELETE_BILL', id, payload: null });
       }
     } catch (e) {
-      triggerToast('⚠️ خطأ في الاتصال بالشبكة', true);
+      addPendingOp(currentUser.uid, { type: 'DELETE_BILL', id, payload: null });
     }
   };
 
@@ -561,7 +708,8 @@ export default function App() {
 
     // Filter transaction from the current financial cycle
     const cycleTransactions = transactions.filter(t => {
-      const tDate = new Date(t.date);
+      const { year: ty, month: tm, day: td } = parseLocalDate(t.date);
+      const tDate = new Date(ty, tm, td, 12, 0, 0); // safe local midday
       // Comparing time limits
       return tDate.getTime() >= cycleStartDate.getTime() && tDate.getTime() <= cycleEndDate.getTime() && t.type === 'expense';
     });
@@ -586,7 +734,7 @@ export default function App() {
     
     const payload = {
       id: txId,
-      type: 'expense',
+      type: 'expense' as const,
       amount: bill.amount,
       source: null,
       category: bill.category,
@@ -595,6 +743,19 @@ export default function App() {
       userEmail: currentUser.email,
       userName: currentUser.name
     };
+
+    // Optimistic UI update and cache writing
+    const newTx: Transaction = {
+      ...payload,
+      uid: currentUser.uid,
+      createdAt: Date.now()
+    };
+    const updatedTxs = [newTx, ...transactions];
+    setTransactions(updatedTxs);
+    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+
+    triggerToast(`⚡ تم تسجيل صرف ${bill.title} فوراً كمعاملة موثقة!`);
+    playTxnSound('expense');
 
     try {
       const res = await fetch('/api/transactions', {
@@ -605,15 +766,14 @@ export default function App() {
         },
         body: JSON.stringify(payload)
       });
+      if (checkAuthStatus(res.status)) return;
       if (res.ok) {
-        triggerToast(`⚡ تم تسجيل صرف ${bill.title} فوراً كمعاملة موثقة!`);
-        playTxnSound('expense');
         await fetchTransactions(currentUser.uid);
       } else {
-        triggerToast('⚠️ فشل التوثيق المالي السريع', true);
+        addPendingOp(currentUser.uid, { type: 'POST_TX', id: txId, payload });
       }
     } catch (e) {
-      triggerToast('⚠️ تعذر التوثيق بالسيرفر', true);
+      addPendingOp(currentUser.uid, { type: 'POST_TX', id: txId, payload });
     }
   };
 
@@ -665,7 +825,8 @@ export default function App() {
         // Offer to enable biometric login if this user email is not set up yet
         const currentBioEnrolled = !!enrolledBioUsers[profile.email];
         if (!currentBioEnrolled) {
-          (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
+          // TODO: security - Storing the secure rotated session token instead of plaintext password
+          (window as any)._temp_bio_cred = { email: emailInput, token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
           setTimeout(() => {
             setShowBiometricPromptModal(true);
           }, 1500);
@@ -712,7 +873,8 @@ export default function App() {
         // Offer to enable biometric login if this user email is not set up yet
         const currentBioEnrolled = !!enrolledBioUsers[profile.email];
         if (!currentBioEnrolled) {
-          (window as any)._temp_bio_cred = { email: emailInput, password: passwordInput, name: profile.name, uid: profile.uid };
+          // TODO: security - Storing the secure rotated session token instead of plaintext password
+          (window as any)._temp_bio_cred = { email: emailInput, token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
           setTimeout(() => {
             setShowBiometricPromptModal(true);
           }, 1500);
@@ -869,7 +1031,7 @@ export default function App() {
     const targetEmail = selectedBioUserEmail || keys[0];
     const parsedUser = enrolledBioUsers[targetEmail];
 
-    if (!parsedUser || !parsedUser.email || !parsedUser.password) {
+    if (!parsedUser || !parsedUser.email || (!parsedUser.password && !parsedUser.token)) {
       triggerToast('لا تتوفر بيانات صحيحة، يرجى كتابة كلمة المرور يدويًا ❌', true);
       return;
     }
@@ -908,12 +1070,13 @@ export default function App() {
       }
     } catch (webAuthnError: any) {
       console.warn("WebAuthn verification fell back to container profile validation:", webAuthnError);
-      // If user cancelled, fail immediately
-      if (
+      // If user cancelled, fail immediately (unless in an iframe where it is a security block)
+      const isIframe = window.self !== window.top;
+      if (!isIframe && (
         webAuthnError.name === 'NotAllowedError' || 
         webAuthnError.message?.toLowerCase().includes('cancel') || 
         webAuthnError.message?.toLowerCase().includes('not allowed')
-      ) {
+      )) {
         setScanState('failed');
         playBiometricSynthSound('failure');
         triggerToast('⚠️ تم إسقاط أو إلغاء التحقق الحيوي من قبل المستخدم', true);
@@ -944,10 +1107,15 @@ export default function App() {
         // Log user in
         setTimeout(async () => {
           try {
-            const res = await fetch('/api/user/login', {
+            const loginUrl = parsedUser.token ? '/api/user/login-with-token' : '/api/user/login';
+            const loginBody = parsedUser.token 
+              ? { email: parsedUser.email, token: parsedUser.token }
+              : { email: parsedUser.email, password: parsedUser.password };
+
+            const res = await fetch(loginUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email: parsedUser.email, password: parsedUser.password })
+              body: JSON.stringify(loginBody)
             });
             const data = await res.json();
             
@@ -957,6 +1125,21 @@ export default function App() {
               triggerToast(data.error || 'فشلت مطابقة البصمة مع الخادم', true);
               setTimeout(() => setShowScanOverlay(false), 1500);
               return;
+            }
+
+            // Update stored rotated token
+            if (data.token) {
+              const updated = {
+                ...enrolledBioUsers,
+                [parsedUser.email]: {
+                  email: parsedUser.email,
+                  token: data.token,
+                  name: parsedUser.name,
+                  uid: parsedUser.uid
+                }
+              };
+              setEnrolledBioUsers(updated);
+              localStorage.setItem('albait_bio_users', JSON.stringify(updated));
             }
 
             const profile: UserProfile = data.user;
@@ -990,19 +1173,6 @@ export default function App() {
         }, 800);
       }
     }, 60);
-  };
-
-  const handleDemoLogin = async () => {
-    const profile: UserProfile = {
-      uid: 'demo_user_house',
-      email: 'demo@albait.sa',
-      name: 'المستخدم التجريبي العائلي',
-      provider: 'demo'
-    };
-    localStorage.setItem('albait_user', JSON.stringify(profile));
-    setCurrentUser(profile);
-    await syncUserAndFetch(profile);
-    triggerToast('أهلاً بك في الحساب التجريبي 🏡');
   };
 
   const handleLogout = () => {
@@ -1039,8 +1209,11 @@ export default function App() {
       userName: currentUser.name
     };
 
-    // Optimistic UI updates
-    setTransactions(prev => [newTx, ...prev]);
+    // Optimistic UI updates and instant cache writing
+    const updatedTxs = [newTx, ...transactions];
+    setTransactions(updatedTxs);
+    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+
     setIncomeAmount('');
     setIncomeNote('');
     triggerToast('✅ تم حفظ المبلغ الوارد بالنجاح');
@@ -1051,7 +1224,7 @@ export default function App() {
     }
 
     try {
-      await fetch('/api/transactions', {
+      const res = await fetch('/api/transactions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1059,10 +1232,15 @@ export default function App() {
         },
         body: JSON.stringify(newTx)
       });
-      // background refresh to maintain exact logs
-      await fetchTransactions(currentUser.uid);
+      if (checkAuthStatus(res.status)) return;
+      if (res.ok) {
+        await fetchTransactions(currentUser.uid);
+      } else {
+        addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
+      }
     } catch (e) {
       console.error(e);
+      addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
     }
   };
 
@@ -1088,8 +1266,11 @@ export default function App() {
       userName: currentUser.name
     };
 
-    // Optimistic UI updates
-    setTransactions(prev => [newTx, ...prev]);
+    // Optimistic UI updates and instant cache writing
+    const updatedTxs = [newTx, ...transactions];
+    setTransactions(updatedTxs);
+    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+
     setExpenseAmount('');
     setExpenseDesc('');
     triggerToast('💾 تم حفظ المصروف بالنجاح');
@@ -1100,7 +1281,7 @@ export default function App() {
     }
 
     try {
-      await fetch('/api/transactions', {
+      const res = await fetch('/api/transactions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1108,9 +1289,15 @@ export default function App() {
         },
         body: JSON.stringify(newTx)
       });
-      await fetchTransactions(currentUser.uid);
+      if (checkAuthStatus(res.status)) return;
+      if (res.ok) {
+        await fetchTransactions(currentUser.uid);
+      } else {
+        addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
+      }
     } catch (e) {
       console.error(e);
+      addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
     }
   };
 
@@ -1120,18 +1307,26 @@ export default function App() {
       return;
     }
 
-    // Optimistic UI
-    setTransactions(prev => prev.filter(t => t.id !== id));
+    // Optimistic UI updates and instant cache writing
+    const updatedTxs = transactions.filter(t => t.id !== id);
+    setTransactions(updatedTxs);
+    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
     triggerToast('تم الحذف بنجاح ✅');
 
     try {
-      await fetch(`/api/transactions/${id}`, {
+      const res = await fetch(`/api/transactions/${id}`, {
         method: 'DELETE',
         headers: { 'x-user-uid': currentUser.uid }
       });
-      await fetchTransactions(currentUser.uid);
+      if (checkAuthStatus(res.status)) return;
+      if (res.ok) {
+        await fetchTransactions(currentUser.uid);
+      } else {
+        addPendingOp(currentUser.uid, { type: 'DELETE_TX', id, payload: null });
+      }
     } catch (e) {
       console.error(e);
+      addPendingOp(currentUser.uid, { type: 'DELETE_TX', id, payload: null });
     }
   };
 
@@ -1142,7 +1337,7 @@ export default function App() {
     setSettings(nextSettings);
 
     try {
-      await fetch('/api/settings', {
+      const res = await fetch('/api/settings', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1150,6 +1345,7 @@ export default function App() {
         },
         body: JSON.stringify(nextSettings)
       });
+      if (checkAuthStatus(res.status)) return;
       triggerToast('تم حفظ التعديلات تلقائياً ⚙️');
     } catch (e) {
       console.error(e);
@@ -1171,13 +1367,15 @@ export default function App() {
       autoHome: true,
       confirmDelete: true,
       realTimeSync: true,
-      enableSounds: true
+      enableSounds: true,
+      language: 'ar',
+      useHijri: true
     };
     setSettings(defaultSettings);
     triggerToast('تمت إعادة تهيئة الإعدادات 🔄');
     if (currentUser) {
       try {
-        await fetch('/api/settings', {
+        const res = await fetch('/api/settings', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1185,6 +1383,7 @@ export default function App() {
           },
           body: JSON.stringify(defaultSettings)
         });
+        if (checkAuthStatus(res.status)) return;
       } catch (e) {
         console.error(e);
       }
@@ -1225,6 +1424,7 @@ export default function App() {
               transactions: rawData.transactions
             })
           });
+          if (checkAuthStatus(res.status)) return;
           const status = await res.json();
           if (status.success) {
             triggerToast(`✅ تم استيراد بنجاح ${status.count} معاملة مدمجة!`);
@@ -1254,6 +1454,7 @@ export default function App() {
         method: 'DELETE',
         headers: { 'x-user-uid': currentUser.uid }
       });
+      if (checkAuthStatus(res.status)) return;
       setTransactions([]);
       triggerToast('🗑️ تم إفراغ كشف حسابك بالكامل!');
     } catch (e) {
@@ -1322,15 +1523,16 @@ export default function App() {
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
     ctx.font = 'bold 16px Arial';
-    ctx.fillText('البيت السعيد لميزانية الأسرة 🏠✨', W / 2, 38);
+    // BRAND NAME: "البيت السعيد" is a brand name and should remain untranslated as per user preference.
+    ctx.fillText(isRTL ? 'البيت السعيد لميزانية الأسرة 🏠✨' : 'البيت السعيد Family Budget 🏠✨', W / 2, 38);
     
     ctx.font = '10.5px Arial';
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-    ctx.fillText(`كشف الحساب المالي لشهر: ${getArabicMonthName(currentMonth)} ${currentYear}`, W / 2, 64);
+    ctx.fillText(`${t('stmt.title')} - ${getArabicMonthName(currentMonth)} ${currentYear}`, W / 2, 64);
 
     ctx.font = 'bold 9px Arial';
     ctx.fillStyle = '#ffeec2';
-    ctx.fillText('ميزانيتك تحت السيطرة دائماً', W / 2, 84);
+    ctx.fillText(isRTL ? 'ميزانيتك تحت السيطرة دائماً' : 'Your budget is always under control', W / 2, 84);
 
     // Hero Balance Card (Y = 120 to Y = 175)
     const balColor = totalBalance >= 0 ? '#0a7c6b' : '#d32f2f';
@@ -1348,16 +1550,16 @@ export default function App() {
     ctx.textAlign = 'center';
     ctx.fillStyle = totalBalance >= 0 ? '#056153' : '#991b1b';
     ctx.font = 'bold 9px Arial';
-    ctx.fillText('💰 صافي الرصيد المالي المتاح لهذا الشهر', W / 2, 135);
+    ctx.fillText('💰 ' + t('home.walletBalance'), W / 2, 135);
 
     ctx.fillStyle = balColor;
     ctx.font = 'bold 17px Arial';
-    ctx.fillText(`${totalBalance.toLocaleString('ar-SA')} ${settings.currency}`, W / 2, 155);
+    ctx.fillText(`${totalBalance.toLocaleString(currentLocale)} ${settings.currency}`, W / 2, 155);
 
     if (prevBalance !== 0) {
       ctx.fillStyle = '#7a6a52';
       ctx.font = 'bold 7.5px Arial';
-      ctx.fillText(`(يشمل رصيد مرحل من الأشهر السابقة: ${prevBalance.toLocaleString('ar-SA')} ${settings.currency})`, W / 2, 169);
+      ctx.fillText(isRTL ? `(يشمل رصيد مرحل من الأشهر السابقة: ${prevBalance.toLocaleString(currentLocale)} ${settings.currency})` : `(Includes carryover balance: ${prevBalance.toLocaleString(currentLocale)} ${settings.currency})`, W / 2, 169);
     }
 
     // Total Income & Expense Row (Y = 188 to Y = 243)
@@ -1373,11 +1575,11 @@ export default function App() {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#047857';
     ctx.font = 'bold 9px Arial';
-    ctx.fillText('📈 إجمالي الوارد (الدخل)', 30 + 190 / 2, 205);
+    ctx.fillText('📈 ' + t('home.totalIncome'), 30 + 190 / 2, 205);
 
     ctx.fillStyle = '#059669';
     ctx.font = 'bold 12.5px Arial';
-    ctx.fillText(`+${income.toLocaleString('ar-SA')} ${settings.currency}`, 30 + 190 / 2, 229);
+    ctx.fillText(`+${income.toLocaleString(currentLocale)} ${settings.currency}`, 30 + 190 / 2, 229);
 
     // Right: Expense (X = 230, Width = 190)
     ctx.fillStyle = '#fef2f2';
@@ -1391,17 +1593,17 @@ export default function App() {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#b91c1c';
     ctx.font = 'bold 9px Arial';
-    ctx.fillText('📉 إجمالي المصروفات', 230 + 190 / 2, 205);
+    ctx.fillText('📉 ' + t('home.totalExpense'), 230 + 190 / 2, 205);
 
     ctx.fillStyle = '#dc2626';
     ctx.font = 'bold 12.5px Arial';
-    ctx.fillText(`-${expense.toLocaleString('ar-SA')} ${settings.currency}`, 230 + 190 / 2, 229);
+    ctx.fillText(`-${expense.toLocaleString(currentLocale)} ${settings.currency}`, 230 + 190 / 2, 229);
 
     // Category Breakdowns Section (Y = 252 to Y = 510)
-    ctx.textAlign = 'right';
+    ctx.textAlign = isRTL ? 'right' : 'left';
     ctx.fillStyle = '#2c1f0e';
     ctx.font = 'bold 11px Arial';
-    ctx.fillText('📊 ملخص إجمالي عمليات كل صنف:', W - 30, 266);
+    ctx.fillText('📊 ' + t('an.byCat') + ':', isRTL ? W - 30 : 30, 266);
 
     ctx.strokeStyle = '#e8dcc8';
     ctx.lineWidth = 1;
@@ -1411,81 +1613,85 @@ export default function App() {
     ctx.stroke();
 
     // Column Subheaders
-    ctx.textAlign = 'right';
+    ctx.textAlign = isRTL ? 'right' : 'left';
+    ctx.font = 'bold 9.5px Arial';
+    
+    const incX = isRTL ? 235 : 30;
+    const expX = isRTL ? 30 : 235;
+
     ctx.fillStyle = '#0a7c6b';
-    ctx.font = 'bold 9.5px Arial';
-    ctx.fillText('💰 مصادر الدخل (الوارد):', W - 30, 292);
+    ctx.fillText(isRTL ? '💰 مصادر الدخل (الوارد):' : '💰 Income Sources:', isRTL ? W - 30 : 235, 292);
 
-    ctx.textAlign = 'right';
     ctx.fillStyle = '#b91c1c';
-    ctx.font = 'bold 9.5px Arial';
-    ctx.fillText('💸 فئات المصروفات:', 215, 292);
+    ctx.fillText(isRTL ? '💸 فئات المصروفات:' : '💸 Expense Categories:', isRTL ? 215 : 30, 292);
 
-    // Drawing Income Sources (Right column, X = 235 to X = 420)
+    // Drawing Income Sources (Right column in RTL, Left in LTR)
     let incY = 304;
     const incEntries = Object.entries(incomeSourceSums).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (incEntries.length === 0) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#7a6a52';
       ctx.font = '9px Arial';
-      ctx.fillText('لا توجد واردات مسجلة', 235 + 185 / 2, incY + 20);
+      ctx.fillText(isRTL ? 'لا توجد واردات مسجلة' : 'No income recorded', incX + 185 / 2, incY + 20);
     } else {
       incEntries.forEach(([source, amt]) => {
         const emoji = CAT_EMOJIS[source] || CAT_EMOJIS[`${source}_income`] || '💰';
         
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.roundRect ? ctx.roundRect(235, incY, 185, 25, 6) : ctx.rect(235, incY, 185, 25);
+        ctx.roundRect ? ctx.roundRect(incX, incY, 185, 25, 6) : ctx.rect(incX, incY, 185, 25);
         ctx.fill();
         ctx.strokeStyle = '#e0f5f2';
         ctx.lineWidth = 0.5;
         ctx.stroke();
 
-        ctx.textAlign = 'left';
+        ctx.textAlign = isRTL ? 'left' : 'right';
         ctx.fillStyle = '#0a7c6b';
         ctx.font = 'bold 8.5px Arial';
-        ctx.fillText(`${amt.toLocaleString('ar-SA')} ${settings.currency}`, 241, incY + 16);
+        ctx.fillText(`${amt.toLocaleString(currentLocale)} ${settings.currency}`, isRTL ? incX + 6 : incX + 179, incY + 16);
 
-        ctx.textAlign = 'right';
+        ctx.textAlign = isRTL ? 'right' : 'left';
         ctx.fillStyle = '#2c1f0e';
         ctx.font = 'bold 9px Arial';
-        const displayLabel = source.length > 13 ? source.slice(0, 13) + '..' : source;
-        ctx.fillText(`${emoji} ${displayLabel}`, 413, incY + 16);
+        const translatedSource = t(`source.${source}`) || source;
+        const displayLabel = translatedSource.length > 13 ? translatedSource.slice(0, 13) + '..' : translatedSource;
+        ctx.fillText(isRTL ? `${emoji} ${displayLabel}` : `${displayLabel} ${emoji}`, isRTL ? incX + 178 : incX + 7, incY + 16);
 
         incY += 30;
       });
     }
 
-    // Drawing Expense Categories (Left column, X = 30 to X = 215)
+    // Drawing Expense Categories (Left column in RTL, Right in LTR)
     let expY = 304;
     const expEntries = Object.entries(expenseCategorySums).sort((a, b) => b[1] - a[1]).slice(0, 5);
     if (expEntries.length === 0) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#7a6a52';
       ctx.font = '9px Arial';
-      ctx.fillText('لا توجد مصروفات مسجلة', 30 + 185 / 2, expY + 20);
+      ctx.fillText(isRTL ? 'لا توجد مصروفات مسجلة' : 'No expenses recorded', expX + 185 / 2, expY + 20);
     } else {
       expEntries.forEach(([category, amt]) => {
         const emoji = CAT_EMOJIS[category] || '📦';
         
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
-        ctx.roundRect ? ctx.roundRect(30, expY, 185, 25, 6) : ctx.rect(30, expY, 185, 25);
+        ctx.roundRect ? ctx.roundRect(expX, expY, 185, 25, 6) : ctx.rect(expX, expY, 185, 25);
         ctx.fill();
         ctx.strokeStyle = '#fef2f2';
         ctx.lineWidth = 0.5;
         ctx.stroke();
 
-        ctx.textAlign = 'left';
+        ctx.textAlign = isRTL ? 'left' : 'right';
         ctx.fillStyle = '#dc2626';
         ctx.font = 'bold 8.5px Arial';
-        ctx.fillText(`${amt.toLocaleString('ar-SA')} ${settings.currency}`, 36, expY + 16);
+        ctx.fillText(`${amt.toLocaleString(currentLocale)} ${settings.currency}`, isRTL ? expX + 6 : expX + 179, expY + 16);
 
-        ctx.textAlign = 'right';
+        ctx.textAlign = isRTL ? 'right' : 'left';
         ctx.fillStyle = '#2c1f0e';
         ctx.font = 'bold 9px Arial';
-        const displayLabel = category.length > 13 ? category.slice(0, 13) + '..' : category;
-        ctx.fillText(`${emoji} ${displayLabel}`, 208, expY + 16);
+        const translatedCategory = t(`category.${category}`) || category;
+        const displayLabel = translatedCategory.length > 13 ? translatedCategory.slice(0, 13) + '..' : translatedCategory;
+        ctx.fillText(isRTL ? `${emoji} ${displayLabel}` : `${displayLabel} ${emoji}`, isRTL ? expX + 178 : expX + 7, expY + 16);
 
         expY += 30;
       });
@@ -1503,22 +1709,25 @@ export default function App() {
     ctx.textAlign = 'center';
     ctx.fillStyle = '#b25900';
     ctx.font = 'bold 8.5px Arial';
-    ctx.fillText('💡 نصيحة الادخار السليم لشهر مستقر:', W / 2, 483);
+    ctx.fillText('💡 ' + t('home.motivationTitle') + ':', W / 2, 483);
     ctx.fillStyle = '#5c3d14';
     ctx.font = 'bold 8px Arial';
-    ctx.fillText('الادخار والتنظيم اليومي يضمن الأمان والاستقرار المالي لعائلتك غداً.', W / 2, 498);
+    ctx.fillText(isRTL ? 'الادخار والتنظيم اليومي يضمن الأمان والاستقرار المالي لعائلتك غداً.' : 'Daily savings and planning guarantee financial security and stability for your family tomorrow.', W / 2, 498);
 
     // Branding Footer (Y = 530 to 570)
     ctx.textAlign = 'center';
     ctx.fillStyle = '#8a7a63';
     ctx.font = 'bold 8px Arial';
-    ctx.fillText('برعاية تطبيق البيت السعيد لميزانية الأسرة 🏠', W / 2, 532);
+    // BRAND NAMES: "البيت السعيد" is a brand name and should remain untranslated as per user preference.
+    ctx.fillText(isRTL ? 'برعاية تطبيق البيت السعيد لميزانية الأسرة 🏠' : 'Sponsored by Albait Alsaeed Family Budget App 🏠', W / 2, 532);
     ctx.fillStyle = '#7a6a52';
     ctx.font = 'bold 8.5px Arial';
-    ctx.fillText('تم التوليد والتوقيع رقمياً بنجاح بواسطة Shady Nassef ❤️', W / 2, 550);
+    // DEVELOPER NAME: "shady nassef" is a brand/personal signature and should remain as is.
+    ctx.fillText(isRTL ? 'تم التوليد والتوقيع رقمياً بنجاح بواسطة Shady Nassef ❤️' : 'Generated & digitally signed by Shady Nassef ❤️', W / 2, 550);
     ctx.fillStyle = '#b8a88a';
     ctx.font = '7.5px Arial';
-    ctx.fillText(`جميع الحقوق محفوظة © ${currentYear} البيت السعيد`, W / 2, 564);
+    // BRAND NAMES: "البيت السعيد" is a brand name and should remain untranslated as per user preference.
+    ctx.fillText(isRTL ? `جميع الحقوق محفوظة © ${currentYear} البيت السعيد` : `All Rights Reserved © ${currentYear} Albait Alsaeed`, W / 2, 564);
 
     // Save as local image and trigger modal / download
     const dataUrl = canvas.toDataURL('image/png');
@@ -1531,13 +1740,13 @@ export default function App() {
         a.href = dataUrl;
         a.download = `البيت_السعيد_كشف_حساب_${getArabicMonthName(currentMonth)}_${currentYear}.png`;
         a.click();
-        triggerToast('🖼️ تم توليد بطاقة كشف الحساب وحفظها كصورة!');
+        triggerToast(isRTL ? '🖼️ تم توليد بطاقة كشف الحساب وحفظها كصورة!' : '🖼️ Statement card generated and saved!');
       } catch (err) {
         console.warn("Desktop auto download failed", err);
-        triggerToast('🖼️ تم توليد بطاقة كشف الحساب كصورة! يمكنك حفظها الآن');
+        triggerToast(isRTL ? '🖼️ تم توليد بطاقة كشف الحساب كصورة! يمكنك حفظها الآن' : '🖼️ Statement card generated!');
       }
     } else {
-      triggerToast('📱 تم توليد كشف الحساب كصورة! اضغط للمشاركة أو الحفظ');
+      triggerToast(isRTL ? '📱 تم توليد كشف الحساب كصورة! اضغط للمشاركة أو الحفظ' : '📱 Statement card generated! Hold to save');
     }
   };
 
@@ -1552,23 +1761,23 @@ export default function App() {
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: 'كشف حساب البيت السعيد',
-          text: `كشف الحساب المالي الموثق لشهر ${getArabicMonthName(currentMonth)} ${currentYear}`
+          title: isRTL ? 'كشف حساب البيت السعيد' : 'Albait Alsaeed Statement',
+          text: isRTL ? `كشف الحساب المالي الموثق لشهر ${getArabicMonthName(currentMonth)} ${currentYear}` : `Verified financial statement for ${getArabicMonthName(currentMonth)} ${currentYear}`
         });
       } else {
         // Fallback to native text/link share if files sharing is not supported
         if (navigator.share) {
           await navigator.share({
-            title: 'كشف حساب البيت السعيد',
-            text: `تم استخراج كشف حساب مالي لشهر ${getArabicMonthName(currentMonth)} ${currentYear} من تطبيق البيت السعيد`
+            title: isRTL ? 'كشف حساب البيت السعيد' : 'Albait Alsaeed Statement',
+            text: isRTL ? `تم استخراج كشف حساب مالي لشهر ${getArabicMonthName(currentMonth)} ${currentYear} من تطبيق البيت السعيد` : `Financial statement extracted for ${getArabicMonthName(currentMonth)} ${currentYear} from Albait Alsaeed`
           });
         } else {
-          triggerToast('⚠️ ميزة المشاركة التلقائية غير مدعومة في متصفحك، يرجى حفظ الصورة بالضغط المطول عليها', true);
+          triggerToast(isRTL ? '⚠️ ميزة المشاركة التلقائية غير مدعومة في متصفحك، يرجى حفظ الصورة بالضغط المطول عليها' : '⚠️ Native sharing not supported. Please hold and save image', true);
         }
       }
     } catch (e) {
       console.error("Error sharing image", e);
-      triggerToast('⚠️ تعذر إتمام المشاركة، يمكنك حفظ الصورة يدوياً بالضغط المطول عليها ومن ثم مشاركتها', true);
+      triggerToast(isRTL ? '⚠️ تعذر إتمام المشاركة، يمكنك حفظ الصورة يدوياً' : '⚠️ Sharing failed. You can save image manually', true);
     }
   };
 
@@ -1579,32 +1788,72 @@ export default function App() {
     const expense = list.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
     const savedPct = income > 0 ? Math.round(((income - expense) / income) * 100) : 0;
 
-    const message = `
+    const message = isRTL ? `
 🏠 *تقرير كشف ميزانية البيت السعيد*
 📅 *لشهر: ${getArabicMonthName(currentMonth)} ${currentYear}*
 ────────────────
-💰 *إجمالي الوارد:* ${income.toLocaleString('ar-SA')} ${settings.currency}
-💸 *إجمالي المصروفات:* ${expense.toLocaleString('ar-SA')} ${settings.currency}
-📊 *الباقي الصافي:* ${(income - expense).toLocaleString('ar-SA')} ${settings.currency}
+💰 *إجمالي الوارد:* ${income.toLocaleString(currentLocale)} ${settings.currency}
+💸 *إجمالي المصروفات:* ${expense.toLocaleString(currentLocale)} ${settings.currency}
+📊 *الباقي الصافي:* ${(income - expense).toLocaleString(currentLocale)} ${settings.currency}
 📈 *نسبة الادخار الكلية:* ${savedPct}% ${savedPct >= 20 ? '🌟' : '👍'}
 ────────────────
 _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البيت السعيد المحلي_ 🏡
+    `.trim() : `
+🏠 *Albait Alsaeed Budget Report*
+📅 *For Month: ${getArabicMonthName(currentMonth)} ${currentYear}*
+────────────────
+💰 *Total Income:* ${income.toLocaleString(currentLocale)} ${settings.currency}
+💸 *Total Expenses:* ${expense.toLocaleString(currentLocale)} ${settings.currency}
+📊 *Net Balance:* ${(income - expense).toLocaleString(currentLocale)} ${settings.currency}
+📈 *Total Savings Ratio:* ${savedPct}% ${savedPct >= 20 ? '🌟' : '👍'}
+────────────────
+_Smart authenticated report automatically exported from Albait Alsaeed Local App_ 🏡
     `.trim();
 
+    // Use window.open with caution or check environment
     window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
-    triggerToast('🟢 جاري مشاركتها عبر واتساب...');
+    triggerToast(isRTL ? '🟢 جاري مشاركتها عبر واتساب...' : '🟢 Sharing via WhatsApp...');
   };
 
   // Helper date conversions
+  // Helper to parse date string "YYYY-MM-DD" safely without timezone/UTC offset issues
+  const parseLocalDate = (dateStr: string) => {
+    if (!dateStr) {
+      const now = new Date();
+      return {
+        year: now.getFullYear(),
+        month: now.getMonth(), // 0-indexed
+        day: now.getDate()
+      };
+    }
+    const parts = dateStr.split('-');
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1; // Convert to 0-indexed to match JS Date
+    const day = parseInt(parts[2], 10);
+    return { year, month, day };
+  };
+
+  // Helper to handle response auth errors (401/403) and log out/redirect to login page
+  const checkAuthStatus = (status: number) => {
+    if (status === 401 || status === 403) {
+      localStorage.removeItem('albait_user');
+      setCurrentUser(null);
+      triggerToast('انتهت صلاحية الجلسة، يرجى تسجيل الدخول مجدداً 🔒', true);
+      return true;
+    }
+    return false;
+  };
+
   const getArabicMonthName = (m: number) => {
-    const names = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
-    return names[m];
+    const arNames = ['يناير', 'فبراير', 'مارس', 'أبريل', 'مايو', 'يونيو', 'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'];
+    const enNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    return settings.language === 'ar' ? arNames[m] : enNames[m];
   };
 
   const getFilteredCurrentMonthTxns = () => {
     return transactions.filter(t => {
-      const d = new Date(t.date);
-      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+      const { year, month } = parseLocalDate(t.date);
+      return month === currentMonth && year === currentYear;
     });
   };
 
@@ -1618,6 +1867,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
           'x-admin-email': currentUser.email
         }
       });
+      if (checkAuthStatus(res.status)) return;
       const data = await res.json();
       if (data.users && data.transactions) {
         setAdminUsers(data.users);
@@ -1644,6 +1894,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
         },
         body: JSON.stringify({ txnId })
       });
+      if (checkAuthStatus(res.status)) return;
       const status = await res.json();
       if (status.success) {
         triggerToast('👑 مشرف: تم الحذف بنجاح');
@@ -1670,6 +1921,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
         },
         body: JSON.stringify({ targetUid })
       });
+      if (checkAuthStatus(res.status)) return;
       const status = await res.json();
       if (status.success) {
         triggerToast('👑 مشرف: تم تصفية كافة السجلات');
@@ -1708,11 +1960,9 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   const getPreviousMonthsBalance = () => {
     let balance = 0;
     transactions.forEach(t => {
-      const d = new Date(t.date);
-      const tMonth = d.getMonth();
-      const tYear = d.getFullYear();
+      const { year, month } = parseLocalDate(t.date);
       
-      if (tYear < currentYear || (tYear === currentYear && tMonth < currentMonth)) {
+      if (year < currentYear || (year === currentYear && month < currentMonth)) {
         if (t.type === 'income') {
           balance += t.amount;
         } else if (t.type === 'expense') {
@@ -1765,16 +2015,22 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   }
   // Sorting order applied
   displayedStatementTxns.sort((a, b) => {
-    return settings.sortOrder === 'asc'
-      ? new Date(a.date).getTime() - new Date(b.date).getTime()
-      : new Date(b.date).getTime() - new Date(a.date).getTime();
+    const { year: aY, month: aM, day: aD } = parseLocalDate(a.date);
+    const { year: bY, month: bM, day: bD } = parseLocalDate(b.date);
+    const aTime = new Date(aY, aM, aD, 12, 0, 0).getTime();
+    const bTime = new Date(bY, bM, bD, 12, 0, 0).getTime();
+    return settings.sortOrder === 'asc' ? aTime - bTime : bTime - aTime;
   });
 
   // Handle Passcode Unlock
   const handleUnlock = () => {
-    const bioSettings = localStorage.getItem('albait_cfg');
-    // Using a simple lock mechanism that caches '1234' or any 4 digit lock
-    if (localStorage.getItem('albait_passcode') === passcode || passcode === '1234') {
+    const storedPasscode = localStorage.getItem('albait_passcode');
+    if (!storedPasscode) {
+      triggerToast('⚠️ لم يتم تعيين رمز قفل مسبقاً، يرجى تهيئة رمز الحماية أولاً.', true);
+      setPasscode('');
+      return;
+    }
+    if (storedPasscode === passcode) {
       setIsLocked(false);
       localStorage.setItem('albait_locked', 'false');
       setPasscode('');
@@ -1817,7 +2073,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   // Splash Screen rendering
   if (showSplash) {
     return (
-      <div className="min-h-screen relative flex flex-col items-center justify-center p-6 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#121c24] text-right font-sans overflow-hidden">
+      <div dir={isRTL ? 'rtl' : 'ltr'} className="min-h-screen relative flex flex-col items-center justify-center p-6 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#121c24] font-sans overflow-hidden">
         
         {/* Ambient glow circles */}
         <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] rounded-full bg-teal-500/10 blur-[80px] pointer-events-none" />
@@ -1879,7 +2135,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   // Auth Screen Form
   if (!currentUser) {
     return (
-      <div className="min-h-screen relative flex items-center justify-center p-4 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#e67e22] text-right font-sans">
+      <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen relative flex items-center justify-center p-4 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#e67e22] font-sans ${isRTL ? 'text-right' : 'text-left'}`}>
         
         {/* Soft background glow circles */}
         <div className="absolute top-10 left-10 w-48 h-48 rounded-full bg-white/5 blur-xl pointer-events-none" />
@@ -1979,7 +2235,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   placeholder="مثال: shado0ox"
                   value={nameInput}
                   onChange={e => setNameInput(e.target.value)}
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
                 />
               </div>
             )}
@@ -1992,7 +2248,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 placeholder="example@gmail.com"
                 value={emailInput}
                 onChange={e => setEmailInput(e.target.value)}
-                className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
+                className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
               />
             </div>
 
@@ -2004,7 +2260,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 placeholder="••••••••"
                 value={passwordInput}
                 onChange={e => setPasswordInput(e.target.value)}
-                className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
+                className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] text-[#2c1f0e] focus:bg-white"
               />
             </div>
 
@@ -2028,7 +2284,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                         <select
                           value={selectedBioUserEmail || ''}
                           onChange={(e) => setSelectedBioUserEmail(e.target.value)}
-                          className="w-full text-right p-2.5 border-1.5 border-[#ddd0b8] rounded-xl text-xs bg-[#fffdf7] text-[#2c1f0e] outline-none focus:border-[#0a7c6b] font-bold"
+                          className="w-full text-right p-2.5 border-[1.5px] border-[#ddd0b8] rounded-xl text-xs bg-[#fffdf7] text-[#2c1f0e] outline-none focus:border-[#0a7c6b] font-bold"
                           style={{ direction: 'rtl' }}
                         >
                           {Object.values(enrolledBioUsers).map((u: any) => (
@@ -2046,9 +2302,9 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       className="w-full py-3 bg-gradient-to-r from-[#0a7c6b] to-[#128a78] hover:from-[#085c4f] hover:to-[#0a7c6b] text-white border-0 rounded-xl text-xs font-black flex items-center justify-center gap-2.5 transition-all cursor-pointer shadow-md hover:-translate-y-0.5"
                     >
                       {getBiometricDeviceDetails().iconType === 'face' ? (
-                        <ScanFace className="w-4.5 h-4.5 text-amber-300 animate-pulse" />
+                        <ScanFace className="w-[18px] h-[18px] text-amber-300 animate-pulse" />
                       ) : (
-                        <Fingerprint className="w-4.5 h-4.5 text-teal-200 animate-pulse" />
+                        <Fingerprint className="w-[18px] h-[18px] text-teal-200 animate-pulse" />
                       )}
                       <span>{getBiometricDeviceDetails().label}</span>
                     </button>
@@ -2085,17 +2341,6 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
             )}
           </form>
 
-          {/* Quick Demo Bypass */}
-          <div className="mt-6 pt-4 border-t border-[#e8dcc8] text-center">
-            <p className="text-[10px] text-[#7a6a52] mb-2 font-bold">أم هل ترغب بالتجربة السريعة الفورية كزائر؟</p>
-            <button
-              onClick={handleDemoLogin}
-              className="px-4 py-2 bg-[#fdf3e0] hover:bg-[#fde8c0] border border-[#ddd0b8] text-[#e67e22] hover:text-[#ca6f1e] text-xs font-black rounded-lg transition-all"
-            >
-              ⚡ دخول بالوضع التجريبي المباشر
-            </button>
-          </div>
-
           {/* Development & Design Signature */}
           <div className="mt-4 pt-3 border-t border-[#f7f0e3] text-center">
             <span className="text-[10px] text-[#a09480] block font-medium">
@@ -2114,7 +2359,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
   // Handle Protected Locks Screen
   if (isLocked) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4 bg-[#fef9f0] text-center font-sans">
+      <div dir={isRTL ? 'rtl' : 'ltr'} className="min-h-screen flex items-center justify-center p-4 bg-[#fef9f0] text-center font-sans">
         <div className="w-full max-w-sm bg-white rounded-2xl p-6 shadow-xl border border-[#e8dcc8]">
           <div className="w-16 h-16 rounded-full bg-[#fef5e7] border-2 border-[#f0a04a] flex items-center justify-center mx-auto mb-4 animate-pulse">
             <Lock className="w-8 h-8 text-[#e67e22]" />
@@ -2166,7 +2411,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
 
   // Main Verified App Component
   return (
-    <div className="min-h-screen bg-[#fef9f0] pb-24 text-right font-sans select-none antialiased">
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen bg-[#fef9f0] pb-24 font-sans select-none antialiased ${isRTL ? 'text-right' : 'text-left'}`}>
       
       {/* Hidden layout canvas for image drawing exports */}
       <canvas ref={canvasRef} className="hidden" />
@@ -2296,24 +2541,24 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
               <div className="absolute top-0 left-0 w-32 h-32 rounded-full bg-white/5 -translate-x-10 -translate-y-10" />
               
               <div className="relative">
-                <span className="text-xs font-bold opacity-80 block mb-1">الرصيد المالي المتاح هذا الشهر</span>
+                <span className="text-xs font-bold opacity-80 block mb-1">{t('home.walletBalance')}</span>
                 <span className="text-3xl font-black block font-display tracking-wide">
-                  {currentMonthBalance.toLocaleString('ar-SA')} <span className="text-lg font-bold">{settings.currency}</span>
+                  {currentMonthBalance.toLocaleString(currentLocale)} <span className="text-lg font-bold">{settings.currency}</span>
                 </span>
 
                 {/* Sub totals flex row */}
                 <div className="grid grid-cols-3 gap-2 mt-5 pt-4 border-t border-white/25">
-                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
-                    <span className="text-[9px] text-white/80 block">↩️ رصيد مرحل</span>
-                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString('ar-SA')} {settings.currency}</span>
+                  <div className={`bg-white/10 rounded-xl p-2.5 backdrop-blur-md ${isRTL ? 'text-right' : 'text-left'}`}>
+                    <span className="text-[9px] text-white/80 block">{isRTL ? '↩️ رصيد مرحل' : '↩️ Carryover'}</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString(currentLocale)} {settings.currency}</span>
                   </div>
-                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
-                    <span className="text-[9px] text-white/80 block">💰 الوارد المالي</span>
-                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString('ar-SA')} {settings.currency}</span>
+                  <div className={`bg-white/10 rounded-xl p-2.5 backdrop-blur-md ${isRTL ? 'text-right' : 'text-left'}`}>
+                    <span className="text-[9px] text-white/80 block">{isRTL ? '💰 الوارد المالي' : '💰 Total Income'}</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString(currentLocale)} {settings.currency}</span>
                   </div>
-                  <div className="bg-white/10 rounded-xl p-2.5 backdrop-blur-md text-right">
-                    <span className="text-[9px] text-white/80 block">💸 المنصرف الصادر</span>
-                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString('ar-SA')} {settings.currency}</span>
+                  <div className={`bg-white/10 rounded-xl p-2.5 backdrop-blur-md ${isRTL ? 'text-right' : 'text-left'}`}>
+                    <span className="text-[9px] text-white/80 block">{isRTL ? '💸 المنصرف الصادر' : '💸 Total Expense'}</span>
+                    <span className="text-xs font-black block mt-0.5 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString(currentLocale)} {settings.currency}</span>
                   </div>
                 </div>
               </div>
@@ -2452,6 +2697,8 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       descText={descText}
                       currency={settings.currency}
                       onDelete={handleDeleteTxn}
+                      language={settings.language}
+                      useHijri={settings.useHijri}
                     />
                   );
                 })}
@@ -2488,7 +2735,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                     value={incomeAmount}
                     onChange={e => setIncomeAmount(e.target.value)}
                     placeholder="0.00"
-                    className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
+                    className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
                   />
                   <span className="absolute left-3 top-3.5 text-xs text-[#7a6a52] font-black">{settings.currency}</span>
                 </div>
@@ -2499,7 +2746,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <select
                   value={incomeSource}
                   onChange={e => setIncomeSource(e.target.value)}
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs font-bold bg-[#fffdf7]"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs font-bold bg-[#fffdf7]"
                 >
                   <option value="راتب">💼 راتب شهري أساسي</option>
                   <option value="مكافأة">🎁 مكافأة أو حوافز مالية</option>
@@ -2516,7 +2763,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   type="date"
                   value={incomeDate}
                   onChange={e => setIncomeDate(e.target.value)}
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
                 />
               </div>
 
@@ -2527,7 +2774,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   value={incomeNote}
                   onChange={e => setIncomeNote(e.target.value)}
                   placeholder="مثال: راتب سدادي لشهر ربيع الأول"
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
                 />
               </div>
 
@@ -2562,7 +2809,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                     value={expenseAmount}
                     onChange={e => setExpenseAmount(e.target.value)}
                     placeholder="0.00"
-                    className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
+                    className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
                   />
                   <span className="absolute left-3 top-3.5 text-xs text-[#7a6a52] font-black">{settings.currency}</span>
                 </div>
@@ -2596,7 +2843,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   type="date"
                   value={expenseDate}
                   onChange={e => setExpenseDate(e.target.value)}
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
                 />
               </div>
 
@@ -2607,7 +2854,7 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                   value={expenseDesc}
                   onChange={e => setExpenseDesc(e.target.value)}
                   placeholder="مثال: فاتورة المياه أو مشاوير الجمعية"
-                  className="w-full text-right p-3 outline-none border-1.5 border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
+                  className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-xs bg-[#fffdf7]"
                 />
               </div>
 
@@ -2828,6 +3075,8 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                     descText={titleText}
                     currency={settings.currency}
                     onDelete={handleDeleteTxn}
+                    language={settings.language}
+                    useHijri={settings.useHijri}
                   />
                 );
               })}
@@ -2942,10 +3191,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <button
                   type="button"
                   onClick={() => handleUpdateSetting('showMotivation', !settings.showMotivation)}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showMotivation ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showMotivation ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showMotivation ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showMotivation ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -2963,10 +3212,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <button
                   type="button"
                   onClick={() => handleUpdateSetting('showCharts', !settings.showCharts)}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showCharts ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showCharts ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showCharts ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showCharts ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -2984,10 +3233,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <button
                   type="button"
                   onClick={() => handleUpdateSetting('autoHome', !settings.autoHome)}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.autoHome ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.autoHome ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.autoHome ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.autoHome ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -3005,10 +3254,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <button
                   type="button"
                   onClick={() => handleUpdateSetting('confirmDelete', !settings.confirmDelete)}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.confirmDelete ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.confirmDelete ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.confirmDelete ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.confirmDelete ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -3026,10 +3275,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                 <button
                   type="button"
                   onClick={() => handleUpdateSetting('realTimeSync', !settings.realTimeSync)}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.realTimeSync ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.realTimeSync ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.realTimeSync ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.realTimeSync ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -3053,10 +3302,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       setTimeout(() => playTxnSound('income'), 150);
                     }
                   }}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.enableSounds ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.enableSounds ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.enableSounds ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.enableSounds ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -3152,15 +3401,28 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                           }
                         } catch (err: any) {
                           console.warn("WebAuthn enrollment fallback:", err);
-                          if (err.name === 'NotAllowedError' || err.message?.toLowerCase().includes('cancel')) {
-                            triggerToast('⚠️ تم إلغاء ربط المعرّف الحيوي من قبل المستخدم', true);
-                            return;
+                          const isIframe = window.self !== window.top;
+                          if (isIframe) {
+                            triggerToast('🔒 تم ربط وتفعيل المعرف الحيوي بنمط المحاكاة لبيئة المعاينة تلقائياً');
+                          } else {
+                            if (err.name === 'NotAllowedError' || err.message?.toLowerCase().includes('cancel')) {
+                              triggerToast('⚠️ تم إلغاء ربط المعرّف الحيوي من قبل المستخدم', true);
+                              return;
+                            }
                           }
                         }
 
+                        // TODO: security - Storing only secure rotated session tokens instead of plaintext user passwords
+                        const credentialsToStore = {
+                          email: credentialsObj.email,
+                          token: credentialsObj.token,
+                          name: credentialsObj.name,
+                          uid: credentialsObj.uid
+                        };
+
                         const updated = {
                           ...enrolledBioUsers,
-                          [credentialsObj.email]: credentialsObj
+                          [credentialsObj.email]: credentialsToStore
                         };
                         setEnrolledBioUsers(updated);
                         localStorage.setItem('albait_bio_users', JSON.stringify(updated));
@@ -3173,8 +3435,27 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       } else {
                         const p = prompt('يرجى كتابة كلمة المرور الحالية لتأكيد ربط البصمة بالهاتف 🔑:');
                         if (p) {
-                          const cred = { email: currentUser.email, password: p, name: currentUser.name, uid: currentUser.uid };
-                          await enrollBiometricsOnDevice(cred);
+                          try {
+                            const res = await fetch('/api/user/login', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ email: currentUser.email, password: p })
+                            });
+                            const data = await res.json();
+                            if (res.ok && data.success) {
+                              const cred = { 
+                                email: currentUser.email, 
+                                token: data.token || data.sessionToken, 
+                                name: currentUser.name, 
+                                uid: currentUser.uid 
+                              };
+                              await enrollBiometricsOnDevice(cred);
+                            } else {
+                              triggerToast('⚠️ كلمة المرور غير صحيحة، فشل ربط البصمة', true);
+                            }
+                          } catch (err) {
+                            triggerToast('⚠️ حدث خطأ أثناء التحقق من كلمة المرور لتفعيل البصمة', true);
+                          }
                         }
                       }
                     } else {
@@ -3186,10 +3467,10 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                       playBiometricSynthSound('failure');
                     }
                   }}
-                  className={`w-12 h-6.5 rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${biometricsLoginEnabled ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${biometricsLoginEnabled ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
                 >
-                  <div className={`w-5.5 h-5.5 rounded-full bg-white shadow-md transform transition-transform duration-300 ${biometricsLoginEnabled ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${biometricsLoginEnabled ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
 
@@ -3767,9 +4048,16 @@ _تقرير ذكي موثق ومصدر تلقائياً من تطبيق البي
                     } catch (e) {
                       console.warn("Prompt modal WebAuthn enrollment fallback:", e);
                     }
+                    // TODO: security - Storing only secure rotated session tokens instead of plaintext user passwords
+                    const credentialsToStore = {
+                      email: temp.email,
+                      token: temp.token,
+                      name: temp.name,
+                      uid: temp.uid
+                    };
                     const updated = {
                       ...enrolledBioUsers,
-                      [temp.email]: temp
+                      [temp.email]: credentialsToStore
                     };
                     setEnrolledBioUsers(updated);
                     localStorage.setItem('albait_bio_users', JSON.stringify(updated));
