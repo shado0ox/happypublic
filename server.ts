@@ -2,14 +2,13 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 
-let resolvedDirname = '';
-try {
-  resolvedDirname = __dirname;
-} catch {
-  resolvedDirname = path.dirname(fileURLToPath(import.meta.url));
-}
+// Global Constants
+const ADMIN_EMAIL = 'shady.nasif@gmail.com';
 
 // Types
 interface User {
@@ -80,6 +79,16 @@ class JSONDatabase {
 
   async init() {
     console.log(`Initialising JSON database at: ${this.filePath}`);
+    try {
+      const dir = path.dirname(this.filePath);
+      if (!fs.existsSync(dir)) {
+        await fs.promises.mkdir(dir, { recursive: true });
+        console.log(`Created database directory: ${dir}`);
+      }
+    } catch (err) {
+      console.error(`Failed to ensure directory exists for database file:`, err);
+    }
+
     if (fs.existsSync(this.filePath)) {
       try {
         const fileContent = await fs.promises.readFile(this.filePath, 'utf-8');
@@ -118,8 +127,52 @@ class JSONDatabase {
   }
 }
 
+// Helpers
+function getDefaultSettings(uid: string): Setting {
+  return {
+    uid,
+    currency: 'ر.س',
+    cycleStart: 1,
+    sortOrder: 'desc',
+    defaultFilter: 'all',
+    defaultCategory: 'طعام وشراب',
+    defaultSource: 'راتب',
+    showMotivation: 1,
+    showCharts: 1,
+    autoHome: 1,
+    confirmDelete: 1,
+    realTimeSync: 1,
+    enableSounds: 1,
+    language: 'ar',
+    useHijri: 1
+  };
+}
+
+function sanitizeUser(user: User) {
+  const { password, ...safeUser } = user;
+  return safeUser;
+}
+
 async function startServer() {
   const app = express();
+
+  // Helmet middleware for basic secure headers
+  app.use(helmet({
+    contentSecurityPolicy: false, // Disabled to prevent blocking local scripts/Vite assets
+    crossOriginEmbedderPolicy: false
+  }));
+
+  // Clean, explicit CORS middleware
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-user-uid, x-auth-token, x-admin-email');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   app.use(express.json());
 
   // Connection tracking for Real-time Device-to-Device Sync
@@ -142,11 +195,68 @@ async function startServer() {
     });
   }
 
+  // Use JSON file (support DATABASE_PATH env var for persistent docker volumes)
+  const dbPath = process.env.DATABASE_PATH || path.join(process.cwd(), 'albait.json');
+  const db = new JSONDatabase(dbPath);
+  await db.init();
+
+  // Middlewares
+  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const uid = (req.headers['x-user-uid'] as string) || (req.query.uid as string);
+    const token = (req.headers['x-auth-token'] as string) || (req.query.token as string);
+
+    if (!uid || !token) {
+      return res.status(401).json({ error: '⚠️ غير مصرح بالدخول: يرجى تسجيل الدخول مجدداً' });
+    }
+
+    const user = db.users.find(u => u.uid === uid && u.token === token);
+    if (!user) {
+      return res.status(401).json({ error: '⚠️ غير مصرح بالدخول: رمز الحماية غير صالح أو منتهي الصلاحية' });
+    }
+
+    (req as any).authUser = user;
+    next();
+  };
+
+  const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    requireAuth(req, res, () => {
+      const user = (req as any).authUser;
+      if (!user || user.email !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة لهذا الحساب 🔒' });
+      }
+      next();
+    });
+  };
+
+  // Login Limiter: 10 attempts every 15 minutes
+  const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: { error: 'محاولات كثيرة جداً، يرجى المحاولة لاحقاً بعد قليل' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
   // API - Real-time Device Sync subscription
   app.get('/api/sync/stream', (req, res) => {
     const uid = req.query.uid as string;
-    if (!uid) {
-      res.status(400).send('UID is required');
+    const token = req.query.token as string;
+
+    if (!uid || !token) {
+      res.status(401).send('Authentication credentials are required');
+      return;
+    }
+
+    const user = db.users.find(u => u.uid === uid && u.token === token);
+    if (!user) {
+      res.status(401).send('Invalid credentials');
+      return;
+    }
+
+    // Connections limit: Max 5 concurrent connections per user
+    const existingConnectionsCount = syncClients.filter(c => c.uid === uid).length;
+    if (existingConnectionsCount >= 5) {
+      res.status(429).send('Too many active connections for this account');
       return;
     }
 
@@ -176,22 +286,6 @@ async function startServer() {
     res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
   });
 
-  // Use JSON file in working directory
-  const dbPath = path.join(process.cwd(), 'albait.json');
-  const db = new JSONDatabase(dbPath);
-  await db.init();
-
-  // Simple seeding helper for any new user (or user with no transactions)
-  async function seedUserTransactions(uid: string, email: string, name: string) {
-    const user = db.users.find(u => u.uid === uid);
-    if (user) {
-      user.seeded = true;
-      await db.save();
-    }
-    // No mock/demo data is seeded per user's requests.
-    return;
-  }
-
   // API - User Register
   app.post('/api/user/register', async (req, res) => {
     try {
@@ -201,22 +295,24 @@ async function startServer() {
       }
 
       const cleanEmail = email.toLowerCase().trim();
-      const uid = cleanEmail.replace(/[^a-z0-9]/g, '_');
+      const cleanName = name.trim();
 
       // Check if user already exists
-      const existingUser = db.users.find(u => u.uid === uid || u.email === cleanEmail);
+      const existingUser = db.users.find(u => u.email === cleanEmail);
       if (existingUser) {
         return res.status(400).json({ error: 'البريد الإلكتروني مسجل بالفعل، يرجى تسجيل الدخول بدلاً من ذلك' });
       }
 
+      const uid = crypto.randomUUID(); // Secure generated unique ID
       const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      const hashedPassword = await bcrypt.hash(password, 10);
 
       // Save user
       const newUser: User = {
         uid,
         email: cleanEmail,
-        name: name.trim(),
-        password,
+        name: cleanName,
+        password: hashedPassword,
         lastLogin: Date.now(),
         provider: 'email',
         createdAt: Date.now(),
@@ -224,45 +320,30 @@ async function startServer() {
       };
       db.users.push(newUser);
 
-      // Create settings if not exists
+      // Create settings
       const hasSettings = db.settings.some(s => s.uid === uid);
       if (!hasSettings) {
-        db.settings.push({
-          uid,
-          currency: 'ر.س',
-          cycleStart: 1,
-          sortOrder: 'desc',
-          defaultFilter: 'all',
-          defaultCategory: 'طعام وشراب',
-          defaultSource: 'راتب',
-          showMotivation: 1,
-          showCharts: 1,
-          autoHome: 1,
-          confirmDelete: 1,
-          realTimeSync: 1,
-          enableSounds: 1,
-          language: 'ar',
-          useHijri: 1
-        });
+        db.settings.push(getDefaultSettings(uid));
       }
 
       await db.save();
 
-      // Seed setup transactions of the new user
-      await seedUserTransactions(uid, cleanEmail, name.trim());
-
-      const userProfile = db.users.find(u => u.uid === uid);
-      const userSettings = db.settings.find(s => s.uid === uid);
-
-      res.status(200).json({ success: true, user: userProfile, settings: userSettings, token: sessionToken, sessionToken });
+      res.status(200).json({
+        success: true,
+        user: sanitizeUser(newUser),
+        settings: db.settings.find(s => s.uid === uid),
+        token: sessionToken,
+        sessionToken
+      });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الحساب' });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - User Login
-  app.post('/api/user/login', async (req, res) => {
+  app.post('/api/user/login', loginLimiter, async (req, res) => {
     try {
       const { email, password } = req.body;
       if (!email || !password) {
@@ -270,43 +351,38 @@ async function startServer() {
       }
 
       const cleanEmail = email.toLowerCase().trim();
-      const uid = cleanEmail.replace(/[^a-z0-9]/g, '_');
-      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-
-      const user = db.users.find(u => u.email === cleanEmail && u.password === password);
-      if (!user) {
+      const user = db.users.find(u => u.email === cleanEmail);
+      if (!user || !user.password) {
         return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
       }
 
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      if (!isValidPassword) {
+        return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
+      }
+
+      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
       user.lastLogin = Date.now();
       user.token = sessionToken;
-      let userSettings = db.settings.find(s => s.uid === user!.uid);
+
+      let userSettings = db.settings.find(s => s.uid === user.uid);
       if (!userSettings) {
-        userSettings = {
-          uid: user.uid,
-          currency: 'ر.س',
-          cycleStart: 1,
-          sortOrder: 'desc',
-          defaultFilter: 'all',
-          defaultCategory: 'طعام وشراب',
-          defaultSource: 'راتب',
-          showMotivation: 1,
-          showCharts: 1,
-          autoHome: 1,
-          confirmDelete: 1,
-          realTimeSync: 1,
-          enableSounds: 1,
-          language: 'ar',
-          useHijri: 1
-        };
+        userSettings = getDefaultSettings(user.uid);
         db.settings.push(userSettings);
       }
 
       await db.save();
-      res.status(200).json({ success: true, user, settings: userSettings, token: sessionToken, sessionToken });
+      res.status(200).json({
+        success: true,
+        user: sanitizeUser(user),
+        settings: userSettings,
+        token: sessionToken,
+        sessionToken
+      });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الدخول' });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
@@ -331,29 +407,22 @@ async function startServer() {
 
       let userSettings = db.settings.find(s => s.uid === user.uid);
       if (!userSettings) {
-        userSettings = {
-          uid: user.uid,
-          currency: 'ر.س',
-          cycleStart: 1,
-          sortOrder: 'desc',
-          defaultFilter: 'all',
-          defaultCategory: 'طعام وشراب',
-          defaultSource: 'راتب',
-          showMotivation: 1,
-          showCharts: 1,
-          autoHome: 1,
-          confirmDelete: 1,
-          realTimeSync: 1,
-          enableSounds: 1
-        };
+        userSettings = getDefaultSettings(user.uid);
         db.settings.push(userSettings);
       }
 
       await db.save();
-      res.status(200).json({ success: true, user, settings: userSettings, token: sessionToken, sessionToken });
+      res.status(200).json({
+        success: true,
+        user: sanitizeUser(user),
+        settings: userSettings,
+        token: sessionToken,
+        sessionToken
+      });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message || 'خطأ غير متوقع أثناء تسجيل الدخول بالتوكن' });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
@@ -370,99 +439,95 @@ async function startServer() {
 
       // Insert or update user
       const existingUserIdx = db.users.findIndex(u => u.uid === uid);
+      let sessionToken = '';
       if (existingUserIdx !== -1) {
+        const existingUser = db.users[existingUserIdx];
+        if (!existingUser.token) {
+          existingUser.token = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+        }
+        sessionToken = existingUser.token;
         db.users[existingUserIdx] = {
-          ...db.users[existingUserIdx],
+          ...existingUser,
           email: cleanEmail,
           name: cleanName,
           lastLogin: Date.now(),
           provider: provider || 'email'
         };
       } else {
+        sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
         db.users.push({
           uid,
           email: cleanEmail,
           name: cleanName,
           lastLogin: Date.now(),
           provider: provider || 'email',
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          token: sessionToken
         });
       }
 
       // Check if user has settings
       let userSettings = db.settings.find(s => s.uid === uid);
       if (!userSettings) {
-        userSettings = {
-          uid,
-          currency: 'ر.س',
-          cycleStart: 1,
-          sortOrder: 'desc',
-          defaultFilter: 'all',
-          defaultCategory: 'طعام وشراب',
-          defaultSource: 'راتب',
-          showMotivation: 1,
-          showCharts: 1,
-          autoHome: 1,
-          confirmDelete: 1,
-          realTimeSync: 1,
-          enableSounds: 1,
-          language: 'ar',
-          useHijri: 1
-        };
+        userSettings = getDefaultSettings(uid);
         db.settings.push(userSettings);
       }
 
       await db.save();
 
-      // Seed mock transactions the very first time
-      await seedUserTransactions(uid, cleanEmail, cleanName);
-
       const userProfile = db.users.find(u => u.uid === uid);
       const finalSettings = db.settings.find(s => s.uid === uid);
 
-      res.status(200).json({ success: true, user: userProfile, settings: finalSettings });
+      res.status(200).json({
+        success: true,
+        user: userProfile ? sanitizeUser(userProfile) : null,
+        settings: finalSettings,
+        token: sessionToken,
+        sessionToken
+      });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message || 'Error syncing user' });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Get User Transactions
-  app.get('/api/transactions', async (req, res) => {
+  app.get('/api/transactions', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string || req.query.uid as string;
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header or uid query parameter is required' });
-      }
+      const uid = (req as any).authUser.uid;
       const txs = db.transactions
         .filter(tx => tx.uid === uid)
         .sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
       res.status(200).json(txs);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Add/Update Transaction
-  app.post('/api/transactions', async (req, res) => {
+  app.post('/api/transactions', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
+      const uid = (req as any).authUser.uid;
       const { id, type, amount, source, category, date, note, userEmail, userName } = req.body;
 
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
-      if (!id || !type || !amount || !date) {
+      if (!id || !type || amount === undefined || !date) {
         return res.status(400).json({ error: 'Missing required transaction fields' });
       }
 
-      const existingIdx = db.transactions.findIndex(tx => tx.id === id);
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ error: 'المبلغ المدخل غير صالح' });
+      }
+
+      const existingIdx = db.transactions.findIndex(tx => tx.id === id && tx.uid === uid);
       if (existingIdx !== -1) {
         db.transactions[existingIdx] = {
           ...db.transactions[existingIdx],
           type,
-          amount: parseFloat(amount),
+          amount: parsedAmount,
           source: source || null,
           category: category || null,
           date,
@@ -473,7 +538,7 @@ async function startServer() {
           id,
           uid,
           type,
-          amount: parseFloat(amount),
+          amount: parsedAmount,
           source: source || null,
           category: category || null,
           date,
@@ -486,23 +551,20 @@ async function startServer() {
 
       await db.save();
       notifySyncClients(uid);
-      const saved = db.transactions.find(tx => tx.id === id);
+      const saved = db.transactions.find(tx => tx.id === id && tx.uid === uid);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Delete Transaction
-  app.delete('/api/transactions/:id', async (req, res) => {
+  app.delete('/api/transactions/:id', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
+      const uid = (req as any).authUser.uid;
       const { id } = req.params;
-
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
 
       if (id === 'all') {
         db.transactions = db.transactions.filter(tx => tx.uid !== uid);
@@ -514,46 +576,47 @@ async function startServer() {
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Get Recurring Bills
-  app.get('/api/recurring-bills', async (req, res) => {
+  app.get('/api/recurring-bills', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string || req.query.uid as string;
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header or uid query parameter is required' });
-      }
+      const uid = (req as any).authUser.uid;
       const bills = db.recurring_bills
         .filter(b => b.uid === uid)
         .sort((a, b) => a.dayOfMonth - b.dayOfMonth || b.createdAt - a.createdAt);
       res.status(200).json(bills);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Add/Update Recurring Bill
-  app.post('/api/recurring-bills', async (req, res) => {
+  app.post('/api/recurring-bills', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
+      const uid = (req as any).authUser.uid;
       const { id, title, amount, category, dayOfMonth } = req.body;
 
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
-      if (!id || !title || !amount || !category) {
+      if (!id || !title || amount === undefined || !category) {
         return res.status(400).json({ error: 'Missing required recurring bill fields' });
       }
 
-      const existingIdx = db.recurring_bills.findIndex(b => b.id === id);
+      const parsedAmount = parseFloat(amount);
+      if (isNaN(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ error: 'المبلغ المدخل غير صالح' });
+      }
+
+      const existingIdx = db.recurring_bills.findIndex(b => b.id === id && b.uid === uid);
       if (existingIdx !== -1) {
         db.recurring_bills[existingIdx] = {
           ...db.recurring_bills[existingIdx],
           title,
-          amount: parseFloat(amount),
+          amount: parsedAmount,
           category,
           dayOfMonth: dayOfMonth || 1
         };
@@ -562,7 +625,7 @@ async function startServer() {
           id,
           uid,
           title,
-          amount: parseFloat(amount),
+          amount: parsedAmount,
           category,
           dayOfMonth: dayOfMonth || 1,
           createdAt: Date.now()
@@ -571,23 +634,20 @@ async function startServer() {
 
       await db.save();
       notifySyncClients(uid);
-      const saved = db.recurring_bills.find(b => b.id === id);
+      const saved = db.recurring_bills.find(b => b.id === id && b.uid === uid);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Delete Recurring Bill
-  app.delete('/api/recurring-bills/:id', async (req, res) => {
+  app.delete('/api/recurring-bills/:id', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
+      const uid = (req as any).authUser.uid;
       const { id } = req.params;
-
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
 
       db.recurring_bills = db.recurring_bills.filter(b => !(b.id === id && b.uid === uid));
       await db.save();
@@ -595,51 +655,34 @@ async function startServer() {
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Get Settings
-  app.get('/api/settings', async (req, res) => {
+  app.get('/api/settings', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string || req.query.uid as string;
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header or uid query is required' });
-      }
+      const uid = (req as any).authUser.uid;
 
       let config = db.settings.find(s => s.uid === uid);
       if (!config) {
-        config = {
-          uid,
-          currency: 'ر.س',
-          cycleStart: 1,
-          sortOrder: 'desc',
-          defaultFilter: 'all',
-          defaultCategory: 'طعام وشراب',
-          defaultSource: 'راتب',
-          showMotivation: 1,
-          showCharts: 1,
-          autoHome: 1,
-          confirmDelete: 1,
-          realTimeSync: 1,
-          enableSounds: 1,
-          language: 'ar',
-          useHijri: 1
-        };
+        config = getDefaultSettings(uid);
         db.settings.push(config);
         await db.save();
       }
       res.status(200).json(config);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Save Settings
-  app.post('/api/settings', async (req, res) => {
+  app.post('/api/settings', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
+      const uid = (req as any).authUser.uid;
       const {
         currency,
         cycleStart,
@@ -656,10 +699,6 @@ async function startServer() {
         language,
         useHijri
       } = req.body;
-
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
 
       const dbShowMotivation = showMotivation ? 1 : 0;
       const dbShowCharts = showCharts ? 1 : 0;
@@ -699,26 +738,23 @@ async function startServer() {
       res.status(200).json(newSettings);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Export JSON User Bundle
-  app.get('/api/export', async (req, res) => {
+  app.get('/api/export', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string || req.query.uid as string;
-      if (!uid) {
-        return res.status(400).json({ error: 'User UID is required' });
-      }
-
-      const user = db.users.find(u => u.uid === uid);
+      const uid = (req as any).authUser.uid;
+      const user = (req as any).authUser;
       const txs = db.transactions.filter(tx => tx.uid === uid);
       const conf = db.settings.find(s => s.uid === uid);
 
       const bundle = {
         exportedAt: new Date().toISOString(),
         databaseType: 'JSON',
-        user: user || { uid },
+        user: sanitizeUser(user),
         settings: conf || {},
         transactions: txs || []
       };
@@ -728,19 +764,16 @@ async function startServer() {
       res.status(200).json(bundle);
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Import JSON back into Database
-  app.post('/api/import', async (req, res) => {
+  app.post('/api/import', requireAuth, async (req, res) => {
     try {
-      const uid = req.headers['x-user-uid'] as string;
-      const { user, settings, transactions: importedTxs } = req.body;
-
-      if (!uid) {
-        return res.status(400).json({ error: 'x-user-uid header is required' });
-      }
+      const uid = (req as any).authUser.uid;
+      const { settings, transactions: importedTxs } = req.body;
 
       // Restore settings
       if (settings) {
@@ -797,37 +830,29 @@ async function startServer() {
       res.status(200).json({ success: true, count: Array.isArray(importedTxs) ? importedTxs.length : 0 });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
-  // API - Admin Stats (RESTRICTED to admin email shady.nasif@gmail.com)
-  app.get('/api/admin/stats', async (req, res) => {
+  // API - Admin Stats (RESTRICTED to requireAdmin)
+  app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     try {
-      const adminEmail = req.headers['x-admin-email'] as string;
-      if (adminEmail !== 'shady.nasif@gmail.com') {
-        return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة لهذا الحساب' });
-      }
-
       res.status(200).json({
-        users: db.users,
+        users: db.users.map(sanitizeUser),
         transactions: db.transactions
       });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Admin Clear User
-  app.post('/api/admin/clear-user', async (req, res) => {
+  app.post('/api/admin/clear-user', requireAdmin, async (req, res) => {
     try {
-      const adminEmail = req.headers['x-admin-email'] as string;
       const { targetUid } = req.body;
-
-      if (adminEmail !== 'shady.nasif@gmail.com') {
-        return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة' });
-      }
       if (!targetUid) {
         return res.status(400).json({ error: 'Target user ID is required' });
       }
@@ -838,19 +863,15 @@ async function startServer() {
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 
   // API - Admin Delete Single Txn
-  app.post('/api/admin/delete-txn', async (req, res) => {
+  app.post('/api/admin/delete-txn', requireAdmin, async (req, res) => {
     try {
-      const adminEmail = req.headers['x-admin-email'] as string;
       const { txnId } = req.body;
-
-      if (adminEmail !== 'shady.nasif@gmail.com') {
-        return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة' });
-      }
       if (!txnId) {
         return res.status(400).json({ error: 'Transaction ID is required' });
       }
@@ -865,7 +886,8 @@ async function startServer() {
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      res.status(500).json({ error: e.message });
+      const isProd = process.env.NODE_ENV === 'production';
+      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
     }
   });
 

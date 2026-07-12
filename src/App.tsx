@@ -292,7 +292,8 @@ export default function App() {
   // Sync biometricsLoginEnabled state for active user
   useEffect(() => {
     if (currentUser && currentUser.email) {
-      setBiometricsLoginEnabled(!!enrolledBioUsers[currentUser.email]);
+      const normalizedEmail = currentUser.email.trim().toLowerCase();
+      setBiometricsLoginEnabled(!!enrolledBioUsers[normalizedEmail]);
     } else {
       setBiometricsLoginEnabled(false);
     }
@@ -329,7 +330,7 @@ export default function App() {
     if (!currentUser || !settings.realTimeSync) return;
 
     console.log('Establishing Real-time Live Sync session via EventSource...');
-    const eventSource = new EventSource(`/api/sync/stream?uid=${encodeURIComponent(currentUser.uid)}`);
+    const eventSource = new EventSource(`/api/sync/stream?uid=${encodeURIComponent(currentUser.uid)}&token=${encodeURIComponent(currentUser.token || '')}`);
 
     eventSource.onmessage = async (event) => {
       try {
@@ -342,7 +343,10 @@ export default function App() {
           // Also fetch and update settings silently
           try {
             const settingsRes = await fetch(`/api/settings`, {
-              headers: { 'x-user-uid': currentUser.uid }
+              headers: {
+                'x-user-uid': currentUser.uid,
+                'x-auth-token': currentUser.token || ''
+              }
             });
             if (checkAuthStatus(settingsRes.status)) return;
             const fetchedSettings = await settingsRes.json();
@@ -401,6 +405,7 @@ export default function App() {
 
     console.log(`Processing ${ops.length} pending offline operations for user: ${uid}...`);
     const remainingOps = [...ops];
+    const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
 
     for (const op of ops) {
       try {
@@ -410,7 +415,8 @@ export default function App() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-user-uid': uid
+              'x-user-uid': uid,
+              'x-auth-token': token
             },
             body: JSON.stringify(op.payload)
           });
@@ -419,7 +425,10 @@ export default function App() {
         } else if (op.type === 'DELETE_TX') {
           const res = await fetch(`/api/transactions/${op.id}`, {
             method: 'DELETE',
-            headers: { 'x-user-uid': uid }
+            headers: {
+              'x-user-uid': uid,
+              'x-auth-token': token
+            }
           });
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
@@ -428,7 +437,8 @@ export default function App() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-user-uid': uid
+              'x-user-uid': uid,
+              'x-auth-token': token
             },
             body: JSON.stringify(op.payload)
           });
@@ -437,7 +447,10 @@ export default function App() {
         } else if (op.type === 'DELETE_BILL') {
           const res = await fetch(`/api/recurring-bills/${op.id}`, {
             method: 'DELETE',
-            headers: { 'x-user-uid': uid }
+            headers: {
+              'x-user-uid': uid,
+              'x-auth-token': token
+            }
           });
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
@@ -544,8 +557,19 @@ export default function App() {
         body: JSON.stringify(profile)
       });
       if (checkAuthStatus(res.status)) return;
+      if (!res.ok) {
+        throw new Error(`Server responded with status: ${res.status}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server response was not JSON');
+      }
       const data = await res.json();
       if (data.success) {
+        if (data.user) {
+          setCurrentUser(data.user);
+          localStorage.setItem('albait_user', JSON.stringify(data.user));
+        }
         if (data.settings) {
           // Setup settings properly converting ints back to booleans
           setSettings({
@@ -571,10 +595,21 @@ export default function App() {
 
   const fetchTransactions = async (uid: string) => {
     try {
+      const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
       const res = await fetch(`/api/transactions?uid=${uid}`, {
-        headers: { 'x-user-uid': uid }
+        headers: {
+          'x-user-uid': uid,
+          'x-auth-token': token
+        }
       });
       if (checkAuthStatus(res.status)) return;
+      if (!res.ok) {
+        throw new Error(`Server responded with status: ${res.status}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server response was not JSON');
+      }
       const data = await res.json();
       if (Array.isArray(data)) {
         setTransactions(data);
@@ -592,10 +627,21 @@ export default function App() {
 
   const fetchRecurringBills = async (uid: string) => {
     try {
+      const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
       const res = await fetch(`/api/recurring-bills?uid=${uid}`, {
-        headers: { 'x-user-uid': uid }
+        headers: {
+          'x-user-uid': uid,
+          'x-auth-token': token
+        }
       });
       if (checkAuthStatus(res.status)) return;
+      if (!res.ok) {
+        throw new Error(`Server responded with status: ${res.status}`);
+      }
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server response was not JSON');
+      }
       const data = await res.json();
       if (Array.isArray(data)) {
         setRecurringBills(data);
@@ -646,7 +692,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify(payload)
       });
@@ -673,7 +720,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/recurring-bills/${id}`, {
         method: 'DELETE',
-        headers: { 'x-user-uid': currentUser.uid }
+        headers: {
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
+        }
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
@@ -762,7 +812,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify(payload)
       });
@@ -823,10 +874,10 @@ export default function App() {
         triggerToast('أهلاً بك مجدداً 👋');
 
         // Offer to enable biometric login if this user email is not set up yet
-        const currentBioEnrolled = !!enrolledBioUsers[profile.email];
+        const currentBioEnrolled = !!enrolledBioUsers[profile.email.trim().toLowerCase()];
         if (!currentBioEnrolled) {
           // TODO: security - Storing the secure rotated session token instead of plaintext password
-          (window as any)._temp_bio_cred = { email: emailInput, token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
+          (window as any)._temp_bio_cred = { email: emailInput.trim().toLowerCase(), token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
           setTimeout(() => {
             setShowBiometricPromptModal(true);
           }, 1500);
@@ -871,10 +922,10 @@ export default function App() {
         triggerToast('تم تسجيل حسابك بالنجاح 🎉');
 
         // Offer to enable biometric login if this user email is not set up yet
-        const currentBioEnrolled = !!enrolledBioUsers[profile.email];
+        const currentBioEnrolled = !!enrolledBioUsers[profile.email.trim().toLowerCase()];
         if (!currentBioEnrolled) {
           // TODO: security - Storing the secure rotated session token instead of plaintext password
-          (window as any)._temp_bio_cred = { email: emailInput, token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
+          (window as any)._temp_bio_cred = { email: emailInput.trim().toLowerCase(), token: data.token || data.sessionToken, name: profile.name, uid: profile.uid };
           setTimeout(() => {
             setShowBiometricPromptModal(true);
           }, 1500);
@@ -1028,7 +1079,7 @@ export default function App() {
       return;
     }
 
-    const targetEmail = selectedBioUserEmail || keys[0];
+    const targetEmail = (selectedBioUserEmail || keys[0]).trim().toLowerCase();
     const parsedUser = enrolledBioUsers[targetEmail];
 
     if (!parsedUser || !parsedUser.email || (!parsedUser.password && !parsedUser.token)) {
@@ -1129,10 +1180,11 @@ export default function App() {
 
             // Update stored rotated token
             if (data.token) {
+              const normalizedEmail = parsedUser.email.trim().toLowerCase();
               const updated = {
                 ...enrolledBioUsers,
-                [parsedUser.email]: {
-                  email: parsedUser.email,
+                [normalizedEmail]: {
+                  email: normalizedEmail,
                   token: data.token,
                   name: parsedUser.name,
                   uid: parsedUser.uid
@@ -1228,7 +1280,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify(newTx)
       });
@@ -1285,7 +1338,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify(newTx)
       });
@@ -1316,7 +1370,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/transactions/${id}`, {
         method: 'DELETE',
-        headers: { 'x-user-uid': currentUser.uid }
+        headers: {
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
+        }
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
@@ -1341,7 +1398,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify(nextSettings)
       });
@@ -1379,7 +1437,8 @@ export default function App() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-user-uid': currentUser.uid
+            'x-user-uid': currentUser.uid,
+            'x-auth-token': currentUser.token || ''
           },
           body: JSON.stringify(defaultSettings)
         });
@@ -1393,7 +1452,7 @@ export default function App() {
   // Export JSON Backup file
   const handleExportJSON = () => {
     if (!currentUser) return;
-    window.open(`/api/export?uid=${currentUser.uid}`, '_blank');
+    window.open(`/api/export?uid=${currentUser.uid}&token=${currentUser.token || ''}`, '_blank');
     triggerToast('⬇️ جاري تحميل ملف النسخة الاحتياطية');
   };
 
@@ -1416,7 +1475,8 @@ export default function App() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-user-uid': currentUser.uid
+              'x-user-uid': currentUser.uid,
+              'x-auth-token': currentUser.token || ''
             },
             body: JSON.stringify({
               user: currentUser,
@@ -1452,7 +1512,10 @@ export default function App() {
     try {
       const res = await fetch(`/api/transactions/all`, {
         method: 'DELETE',
-        headers: { 'x-user-uid': currentUser.uid }
+        headers: {
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
+        }
       });
       if (checkAuthStatus(res.status)) return;
       setTransactions([]);
@@ -1864,7 +1927,9 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
     try {
       const res = await fetch('/api/admin/stats', {
         headers: {
-          'x-admin-email': currentUser.email
+          'x-admin-email': currentUser.email,
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         }
       });
       if (checkAuthStatus(res.status)) return;
@@ -1890,7 +1955,9 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': currentUser.email
+          'x-admin-email': currentUser.email,
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify({ txnId })
       });
@@ -1917,7 +1984,9 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-email': currentUser.email
+          'x-admin-email': currentUser.email,
+          'x-user-uid': currentUser.uid,
+          'x-auth-token': currentUser.token || ''
         },
         body: JSON.stringify({ targetUid })
       });
@@ -3373,6 +3442,11 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       const temp = (window as any)._temp_bio_cred;
                       
                       const enrollBiometricsOnDevice = async (credentialsObj: any) => {
+                        if (!currentUser || !credentialsObj || credentialsObj.email.trim().toLowerCase() !== currentUser.email.trim().toLowerCase()) {
+                          triggerToast('⚠️ خطأ في الربط: البريد الإلكتروني لا يتطابق مع الحساب النشط حالياً', true);
+                          return;
+                        }
+
                         try {
                           if (window.PublicKeyCredential) {
                             const canVerify = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
@@ -3413,8 +3487,9 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                         }
 
                         // TODO: security - Storing only secure rotated session tokens instead of plaintext user passwords
+                        const normalizedEmail = credentialsObj.email.trim().toLowerCase();
                         const credentialsToStore = {
-                          email: credentialsObj.email,
+                          email: normalizedEmail,
                           token: credentialsObj.token,
                           name: credentialsObj.name,
                           uid: credentialsObj.uid
@@ -3422,15 +3497,15 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
                         const updated = {
                           ...enrolledBioUsers,
-                          [credentialsObj.email]: credentialsToStore
+                          [normalizedEmail]: credentialsToStore
                         };
                         setEnrolledBioUsers(updated);
                         localStorage.setItem('albait_bio_users', JSON.stringify(updated));
-                        triggerToast(`🔒 تم ربط وتفعيل المعرف الحيوي بنجاح لحسابك: ${credentialsObj.email}`);
+                        triggerToast(`🔒 تم ربط وتفعيل المعرف الحيوي بنجاح لحسابك: ${normalizedEmail}`);
                         playBiometricSynthSound('success');
                       };
 
-                      if (temp && temp.email === currentUser.email) {
+                      if (temp && temp.email.trim().toLowerCase() === currentUser.email.trim().toLowerCase()) {
                         await enrollBiometricsOnDevice(temp);
                       } else {
                         const p = prompt('يرجى كتابة كلمة المرور الحالية لتأكيد ربط البصمة بالهاتف 🔑:');
@@ -3444,7 +3519,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                             const data = await res.json();
                             if (res.ok && data.success) {
                               const cred = { 
-                                email: currentUser.email, 
+                                email: currentUser.email.trim().toLowerCase(), 
                                 token: data.token || data.sessionToken, 
                                 name: currentUser.name, 
                                 uid: currentUser.uid 
@@ -3459,8 +3534,9 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                         }
                       }
                     } else {
+                      const normalizedEmail = currentUser.email.trim().toLowerCase();
                       const updated = { ...enrolledBioUsers };
-                      delete updated[currentUser.email];
+                      delete updated[normalizedEmail];
                       setEnrolledBioUsers(updated);
                       localStorage.setItem('albait_bio_users', JSON.stringify(updated));
                       triggerToast('🔓 تم إلغاء تفعيل تسجيل الدخول بالبصمة لحسابك');
@@ -4025,6 +4101,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                 onClick={async () => {
                   const temp = (window as any)._temp_bio_cred;
                   if (temp) {
+                    if (!currentUser || temp.email.trim().toLowerCase() !== currentUser.email.trim().toLowerCase()) {
+                      triggerToast('⚠️ خطأ في الربط: البريد الإلكتروني لا يتطابق مع الحساب النشط حالياً', true);
+                      setShowBiometricPromptModal(false);
+                      return;
+                    }
+
                     try {
                       if (window.PublicKeyCredential) {
                         const canVerify = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
@@ -4049,20 +4131,21 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       console.warn("Prompt modal WebAuthn enrollment fallback:", e);
                     }
                     // TODO: security - Storing only secure rotated session tokens instead of plaintext user passwords
+                    const normalizedEmail = temp.email.trim().toLowerCase();
                     const credentialsToStore = {
-                      email: temp.email,
+                      email: normalizedEmail,
                       token: temp.token,
                       name: temp.name,
                       uid: temp.uid
                     };
                     const updated = {
                       ...enrolledBioUsers,
-                      [temp.email]: credentialsToStore
+                      [normalizedEmail]: credentialsToStore
                     };
                     setEnrolledBioUsers(updated);
                     localStorage.setItem('albait_bio_users', JSON.stringify(updated));
-                    setSelectedBioUserEmail(temp.email);
-                    triggerToast(`🔓 تم ربط وتفعيل المعرف الحيوي بنجاح لـ: ${temp.email}!`);
+                    setSelectedBioUserEmail(normalizedEmail);
+                    triggerToast(`🔓 تم ربط وتفعيل المعرف الحيوي بنجاح لـ: ${normalizedEmail}!`);
                     playBiometricSynthSound('success');
                   } else {
                     triggerToast('حدث خطأ في جلب بيانات الحساب المطلوبة للتفعيل', true);
