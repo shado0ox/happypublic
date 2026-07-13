@@ -58,6 +58,7 @@ import {
   Tooltip as RechartsTooltip
 } from 'recharts';
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
+import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
 // @ts-ignore
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
 // @ts-ignore
@@ -1239,23 +1240,18 @@ export default function App() {
   };
 
   // Save Transaction
-  const handleSaveIncome = async () => {
-    const val = parseFloat(incomeAmount);
-    if (!val || val <= 0) {
-      triggerToast('أدخل مبلغاً صحيحاً ⚠️', true);
-      return;
-    }
+  const executeSaveIncome = async (amountVal: number, sourceVal: string, noteVal: string) => {
     if (!currentUser) return;
 
     const newTx: Transaction = {
       id: 'tx_inc_' + Date.now() + Math.random().toString(36).substr(2, 5),
       uid: currentUser.uid,
       type: 'income',
-      amount: val,
-      source: incomeSource,
+      amount: amountVal,
+      source: sourceVal,
       category: null,
       date: incomeDate,
-      note: incomeNote.trim() || null,
+      note: noteVal.trim() || null,
       createdAt: Date.now(),
       userEmail: currentUser.email,
       userName: currentUser.name
@@ -1297,23 +1293,37 @@ export default function App() {
     }
   };
 
-  const handleSaveExpense = async () => {
-    const val = parseFloat(expenseAmount);
+  const handleSaveIncome = async () => {
+    const val = parseFloat(incomeAmount);
     if (!val || val <= 0) {
       triggerToast('أدخل مبلغاً صحيحاً ⚠️', true);
       return;
     }
+    await executeSaveIncome(val, incomeSource, incomeNote);
+  };
+
+  const handleVoiceApplyIncome = async (parsed: VoiceParsedResult) => {
+    if (!parsed.amount) return;
+    const finalSource = parsed.categoryOrSource || incomeSource;
+    const finalNote = parsed.note || '';
+    setIncomeAmount(String(parsed.amount));
+    setIncomeSource(finalSource);
+    setIncomeNote(finalNote);
+    await executeSaveIncome(parsed.amount, finalSource, finalNote);
+  };
+
+  const executeSaveExpense = async (amountVal: number, categoryVal: string, noteVal: string) => {
     if (!currentUser) return;
 
     const newTx: Transaction = {
       id: 'tx_exp_' + Date.now() + Math.random().toString(36).substr(2, 5),
       uid: currentUser.uid,
       type: 'expense',
-      amount: val,
+      amount: amountVal,
       source: null,
-      category: expenseCategory,
+      category: categoryVal,
       date: expenseDate,
-      note: expenseDesc.trim() || null,
+      note: noteVal.trim() || null,
       createdAt: Date.now(),
       userEmail: currentUser.email,
       userName: currentUser.name
@@ -1353,6 +1363,25 @@ export default function App() {
       console.error(e);
       addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
     }
+  };
+
+  const handleSaveExpense = async () => {
+    const val = parseFloat(expenseAmount);
+    if (!val || val <= 0) {
+      triggerToast('أدخل مبلغاً صحيحاً ⚠️', true);
+      return;
+    }
+    await executeSaveExpense(val, expenseCategory, expenseDesc);
+  };
+
+  const handleVoiceApplyExpense = async (parsed: VoiceParsedResult) => {
+    if (!parsed.amount) return;
+    const finalCategory = parsed.categoryOrSource || expenseCategory;
+    const finalNote = parsed.note || '';
+    setExpenseAmount(String(parsed.amount));
+    setExpenseCategory(finalCategory);
+    setExpenseDesc(finalNote);
+    await executeSaveExpense(parsed.amount, finalCategory, finalNote);
   };
 
   const handleDeleteTxn = async (id: string) => {
@@ -2793,6 +2822,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               تسجيل دخل وارد جديد
             </h2>
 
+            <VoiceAssistant
+              mode="income"
+              currency={settings.currency}
+              onApply={handleVoiceApplyIncome}
+              triggerToast={triggerToast}
+            />
+
             <div className="space-y-4 pt-1">
               <div>
                 <label className="block text-xs font-bold mb-1.5 text-[#2c1f0e]">المبلغ الإجمالي (ريال سعودي أو حسب الإعدادات)</label>
@@ -2866,6 +2902,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               <span className="text-xl">💸</span>
               تسجيل مصروف منزلي جديد
             </h2>
+
+            <VoiceAssistant
+              mode="expense"
+              currency={settings.currency}
+              onApply={handleVoiceApplyExpense}
+              triggerToast={triggerToast}
+            />
 
             <div className="space-y-4 pt-1">
               <div>
