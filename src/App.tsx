@@ -135,6 +135,8 @@ const MOTIVATIONS = [
 
 export default function App() {
   // Navigation & Screens state
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const settingsSavePending = useRef(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'income' | 'expense' | 'statement' | 'settings' | 'admin' | 'family'>('dashboard');
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   
@@ -1469,26 +1471,33 @@ export default function App() {
   };
 
   // General Settings changes
-  const handleUpdateSetting = async (key: keyof AppSettings, value: any) => {
-    if (!currentUser) return;
-    const nextSettings = { ...settings, [key]: value };
-    setSettings(nextSettings);
-
+  const savePersonalSettings = async (nextSettings: AppSettings, message: string) => {
+    if (!currentUser || settingsSavePending.current) return false;
+    settingsSavePending.current = true;
+    setSettingsSaving(true);
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-uid': currentUser.uid,
-          'x-auth-token': currentUser.token || ''
-        },
+        headers: { 'Content-Type': 'application/json', 'x-user-uid': currentUser.uid, 'x-auth-token': getSessionToken(currentUser.uid) },
         body: JSON.stringify(nextSettings)
       });
-      if (checkAuthStatus(res.status)) return;
-      triggerToast('تم حفظ التعديلات تلقائياً ⚙️');
-    } catch (e) {
-      console.error(e);
+      if (checkAuthStatus(res.status)) return false;
+      if (!res.ok) throw new Error('Settings save failed');
+      setSettings(nextSettings);
+      triggerToast(message);
+      return true;
+    } catch {
+      triggerToast('تعذر حفظ الإعدادات. تحقق من الاتصال وحاول مجددًا.', true);
+      return false;
+    } finally {
+      settingsSavePending.current = false;
+      setSettingsSaving(false);
     }
+  };
+
+  const handleUpdateSetting = async (key: keyof AppSettings, value: any) => {
+    if (settings[key] === value) return;
+    await savePersonalSettings({ ...settings, [key]: value }, 'تم حفظ الإعدادات');
   };
 
   const handleResetSettings = async () => {
@@ -1510,24 +1519,7 @@ export default function App() {
       language: 'ar',
       useHijri: true
     };
-    setSettings(defaultSettings);
-    triggerToast('تمت إعادة تهيئة الإعدادات 🔄');
-    if (currentUser) {
-      try {
-        const res = await fetch('/api/settings', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-uid': currentUser.uid,
-            'x-auth-token': currentUser.token || ''
-          },
-          body: JSON.stringify(defaultSettings)
-        });
-        if (checkAuthStatus(res.status)) return;
-      } catch (e) {
-        console.error(e);
-      }
-    }
+    await savePersonalSettings(defaultSettings, 'تمت استعادة الإعدادات الافتراضية');
   };
 
   // Export JSON Backup file
@@ -1605,25 +1597,25 @@ export default function App() {
 
   // Clear all data
   const handleClearAllData = async () => {
-    if (!currentUser) return;
-    if (!confirm('⚠️ تحذير: سيتم مسح كافة البيانات المسجلة لحسابك الحالي نهائياً ولا يمكن استرجاعها!')) return;
-    if (!confirm('لتأكيد المسح بالكامل اضغط موافق مرة أخرى...')) return;
-
+    if (!currentUser || settingsSavePending.current) return;
+    if (!confirm('حذف جميع معاملات الدفتر الشخصي نهائيًا؟ لا يشمل دفاتر العائلة أو الفواتير المتكررة.')) return;
+    if (!confirm('تأكيد حذف المعاملات الشخصية؟ لا يمكن التراجع.')) return;
+    settingsSavePending.current = true;
+    setSettingsSaving(true);
     try {
-      const res = await fetch(`/api/transactions/all`, {
+      const res = await fetch('/api/transactions/all', {
         method: 'DELETE',
-        headers: {
-          'x-user-uid': currentUser.uid,
-          'x-auth-token': currentUser.token || ''
-        }
+        headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': getSessionToken(currentUser.uid) }
       });
       if (checkAuthStatus(res.status)) return;
+      if (!res.ok) throw new Error('Delete failed');
       setTransactions([]);
-      triggerToast('🗑️ تم إفراغ كشف حسابك بالكامل!');
-    } catch (e) {
-      // Local fallback anyway
-      setTransactions([]);
-      triggerToast('تمت تصفية كشف الحساب محلياً', false);
+      triggerToast('تم حذف المعاملات الشخصية');
+    } catch {
+      triggerToast('تعذر حذف المعاملات. تحقق من الاتصال وحاول مجددًا.', true);
+    } finally {
+      settingsSavePending.current = false;
+      setSettingsSaving(false);
     }
   };
 
@@ -3214,19 +3206,11 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         {/* Global Configuration/Settings View */}
         {activeTab === 'settings' && (
-          <div className="space-y-4">
-            
-            <div className="p-3.5 rounded-xl bg-[#e0f5f2] border border-[#a8ffec] text-[11px] text-[#0a7c6b] font-bold leading-relaxed">
-              ⚙️ كافة الإعدادات تترجم فوراً وبشكل تلقائي على تخزين جهازك وسكيولايت الداخلي!
-            </div>
-
-            {/* First Settings Card */}
-            <div className="bg-white rounded-2xl p-5 border border-[#e8dcc8] shadow-xs space-y-1">
-              <h3 className="text-xs font-black text-[#2c1f0e] flex items-center gap-2 pb-2 mb-3 border-b border-[#e8dcc8]">
-                <Sliders className="w-4 h-4 text-[#0a7c6b]" />
-                تهيئات عامة للنظام مخصصة
-              </h3>
-
+          <section className="compact-settings space-y-3" aria-label="إعدادات الدفتر الشخصي" aria-busy={settingsSaving}>
+            <div className="settings-title"><h2>الإعدادات</h2><p>للدفتر الشخصي؛ إعدادات العائلة داخل دفترها.</p></div>
+            {settingsSaving && <p role="status" className="text-sm text-[#0a7c6b]">جاري حفظ التغييرات…</p>}
+            <fieldset disabled={settingsSaving} className="space-y-3 min-w-0">
+            <div className="settings-basics"><h3>الميزانية</h3>
               {/* Currency symbol selector */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3234,27 +3218,26 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <Coins className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">رمز العملة النشطة</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">رمز العملة المالي المستخدم بالجداول</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">العملة</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">رمز العرض فقط؛ لا يحوّل المبالغ</span>
                   </div>
                 </div>
                 <select
-                  value={settings.currency}
+                  aria-label="العملة" value={settings.currency}
                   onChange={e => handleUpdateSetting('currency', e.target.value)}
                   className="p-1.5 px-3 select-setting bg-[#fdf3e0]/50 border border-[#ddd0b8] rounded-lg text-xs font-bold text-[#2c1f0e] focus:outline-none"
                 >
-                  <option value="ر.س">ريال سعودي (ر.س)</option>
+                  <option value="ر.س">ريال سعودي</option>
                   <option value="SAR">SAR</option>
-                  <option value="ج.م">جنيه مصري (ج.م)</option>
-                  <option value="د.ك">دينار كويتي (د.ك)</option>
-                  <option value="د.إ">درهم إماراتي (د.إ)</option>
-                  <option value="د.ب">دينار بحريني (د.ب)</option>
-                  <option value="ر.ع">ريال عُماني (ر.ع)</option>
-                  <option value="$">دولار أمريكي ($)</option>
-                  <option value="€">يورو (€)</option>
+                  <option value="ج.م">جنيه مصري</option>
+                  <option value="د.ك">دينار كويتي</option>
+                  <option value="د.إ">درهم إماراتي</option>
+                  <option value="د.ب">دينار بحريني</option>
+                  <option value="ر.ع">ريال عُماني</option>
+                  <option value="$">دولار أمريكي</option>
+                  <option value="€">يورو</option>
                 </select>
               </div>
-
               {/* Cycle start day */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3262,12 +3245,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <Calendar className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">بداية الدورة المالية المنزلية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">اليوم المحدد لبداية الميزانية شهرياً</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">بداية الدورة</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">يوم بداية الميزانية كل شهر</span>
                   </div>
                 </div>
                 <input
-                  type="number"
+                  aria-label="بداية الدورة" type="number"
                   min={1}
                   max={28}
                   value={settings.cycleStart}
@@ -3275,7 +3258,8 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   className="w-16 p-1.5 bg-[#fdf3e0]/50 text-center border border-[#ddd0b8] rounded-lg text-xs font-bold text-[#2c1f0e]"
                 />
               </div>
-
+            </div>
+            <details className="settings-section"><summary>العرض والسلوك<span>الترتيب، الرسوم، الأصوات والشعار</span></summary>
               {/* Sorting option */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3283,12 +3267,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <ArrowUpDown className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">ترتيب القوائم المالية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">ترتيب حزم المعاملات تبعاً للتاريخ</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">ترتيب المعاملات</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">حسب التاريخ</span>
                   </div>
                 </div>
                 <select
-                  value={settings.sortOrder}
+                  aria-label="ترتيب المعاملات" value={settings.sortOrder}
                   onChange={e => handleUpdateSetting('sortOrder', e.target.value)}
                   className="p-1.5 px-3 select-setting bg-[#fdf3e0]/50 border border-[#ddd0b8] rounded-lg text-xs font-bold text-[#2c1f0e]"
                 >
@@ -3296,7 +3280,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <option value="asc">من الأقدم إلى الأحدث</option>
                 </select>
               </div>
-
               {/* Toggle Motivation Cards */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3304,12 +3287,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <Lightbulb className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">إظهار شريط الجمل التحفيزية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">ظهور كرت النصائح على الصفحة الرئيسية</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">نصائح الادخار</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">إظهار النصائح في الرئيسية</span>
                   </div>
                 </div>
                 <button
-                  type="button"
+                  type="button" role="switch" aria-label="نصائح الادخار" aria-checked={settings.showMotivation}
                   onClick={() => handleUpdateSetting('showMotivation', !settings.showMotivation)}
                   className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showMotivation ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
@@ -3317,7 +3300,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showMotivation ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
-
               {/* Toggle Charts */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3325,12 +3307,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <BarChart3 className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">تمكين الرسوم البيانية التفاعلية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">عرض المخططات الدائرية بكشف الحساب</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">الرسوم البيانية</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">إظهار المخططات في كشف الحساب</span>
                   </div>
                 </div>
                 <button
-                  type="button"
+                  type="button" role="switch" aria-label="الرسوم البيانية" aria-checked={settings.showCharts}
                   onClick={() => handleUpdateSetting('showCharts', !settings.showCharts)}
                   className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.showCharts ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
@@ -3338,7 +3320,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.showCharts ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
-
               {/* Toggle Auto home routing after entry */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3346,12 +3327,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <Home className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">تحويل تلقائي للرئيسية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">توجيهك للرئيسية عند تمام كل توثيق</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">العودة للرئيسية</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">بعد حفظ المعاملة</span>
                   </div>
                 </div>
                 <button
-                  type="button"
+                  type="button" role="switch" aria-label="العودة للرئيسية" aria-checked={settings.autoHome}
                   onClick={() => handleUpdateSetting('autoHome', !settings.autoHome)}
                   className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.autoHome ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
                   style={{ direction: 'ltr' }}
@@ -3359,49 +3340,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.autoHome ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
-
-              {/* Toggle confirm delete before transaction removal */}
-              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center text-red-500 shrink-0">
-                    <Trash2 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">تأكيد عملية الحذف</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">السؤال قبل حذف أي معاملة مالية لتفادي الأخطاء</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleUpdateSetting('confirmDelete', !settings.confirmDelete)}
-                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.confirmDelete ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
-                  style={{ direction: 'ltr' }}
-                >
-                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.confirmDelete ? 'translate-x-[22px]' : 'translate-x-0'}`} />
-                </button>
-              </div>
-
-              {/* Toggle Real-time instant sync */}
-              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
-                <div className="flex items-center gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600 shrink-0">
-                    <RefreshCw className="w-4 h-4 animate-pulse" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">المزامنة الفورية اللحظية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تحديث فوري وتحديث كافة الأجهزة المفتوحة في نفس اللحظة</span>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleUpdateSetting('realTimeSync', !settings.realTimeSync)}
-                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.realTimeSync ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
-                  style={{ direction: 'ltr' }}
-                >
-                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.realTimeSync ? 'translate-x-[22px]' : 'translate-x-0'}`} />
-                </button>
-              </div>
-
               {/* Toggle Sound Effects */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3409,12 +3347,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     {settings.enableSounds ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">أصوات وتنبيهات تلميحية</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تشغيل صوت رنين تفاعلي عند إضافة مصاريف أو وارد مالي جديد</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">أصوات الحفظ</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تشغيل صوت عند حفظ معاملة</span>
                   </div>
                 </div>
                 <button
-                  type="button"
+                  type="button" role="switch" aria-label="أصوات الحفظ" aria-checked={settings.enableSounds}
                   onClick={() => {
                     const nextVal = !settings.enableSounds;
                     handleUpdateSetting('enableSounds', nextVal);
@@ -3428,7 +3366,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.enableSounds ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
-
               {/* Toggle Logo Icon Style */}
               <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
                 <div className="flex items-center gap-3">
@@ -3436,8 +3373,8 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <span className="text-[14px]">✨</span>
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">نمط أيقونة البرنامج</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تبديل شكل الشعار بين الأيقونة الشفافة المحدّدة بالذهب أو الكلاسيكية</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">شكل الشعار</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">اختيار الشعار الظاهر على هذا الجهاز</span>
                   </div>
                 </div>
                 <div className="flex bg-[#fff9e6] rounded-md p-0.5 border border-[#e8dcc8] gap-1 shrink-0" style={{ direction: 'rtl' }}>
@@ -3452,7 +3389,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       logoType === 'new' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
                     }`}
                   >
-                    محدّد وشفاف
+                    الجديد
                   </button>
                   <button
                     type="button"
@@ -3465,11 +3402,32 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       logoType === 'classic' ? 'bg-[#0a7c6b] text-white shadow-xs' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
                     }`}
                   >
-                    كلاسيكي قديم
+                    الكلاسيكي
                   </button>
                 </div>
               </div>
-
+            </details>
+            <details className="settings-section"><summary>الدخول والحذف<span>الدخول السريع وتأكيد الحذف</span></summary>
+              {/* Toggle confirm delete before transaction removal */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-red-50 flex items-center justify-center text-red-500 shrink-0">
+                    <Trash2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">تأكيد الحذف</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">السؤال قبل حذف معاملة</span>
+                  </div>
+                </div>
+                <button
+                  type="button" role="switch" aria-label="تأكيد الحذف" aria-checked={settings.confirmDelete}
+                  onClick={() => handleUpdateSetting('confirmDelete', !settings.confirmDelete)}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.confirmDelete ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.confirmDelete ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
               {/* Toggle Biometric Login */}
               <div className="flex items-center justify-between gap-4 py-3">
                 <div className="flex items-center gap-3">
@@ -3477,12 +3435,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                     <Fingerprint className="w-4 h-4" />
                   </div>
                   <div>
-                    <span className="text-xs font-bold text-[#2c1f0e] block">بصمة الإصبع وبصمة الوجه</span>
-                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تسجيل دخول مباشر ومؤمّن وتلقائي</span>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">الدخول السريع</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">حفظ جلسة الدخول على هذا الجهاز</span>
                   </div>
                 </div>
                 <button
-                  type="button"
+                  type="button" role="switch" aria-label="الدخول السريع" aria-checked={biometricsLoginEnabled}
                   onClick={async () => {
                     if (!currentUser || currentUser.provider === 'demo') {
                       triggerToast('غير متاح بالوضع التجريبي، يرجى تسجيل الدخول بحساب حقيقي للتفعيل 📱', true);
@@ -3600,30 +3558,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${biometricsLoginEnabled ? 'translate-x-[22px]' : 'translate-x-0'}`} />
                 </button>
               </div>
-
-            </div>
-
-            {/* Recurring Expenses (Fixed Bills) Manager */}
-            <div className="bg-white rounded-2xl p-5 border border-[#e8dcc8] shadow-sm space-y-4">
-              <div className="flex items-center justify-between pb-2 border-b border-[#e8dcc8]">
-                <h3 className="text-xs font-black text-[#2c1f0e] flex items-center gap-2">
-                  <span className="text-base">📅</span>
-                  <span>تذكير المصاريف المتكررة والفواتير الثابتة</span>
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setShowRecurringManager(!showRecurringManager)}
-                  className="p-1 px-2.5 rounded bg-orange-50 text-amber-700 hover:bg-orange-100 text-[10px] font-black transition-all"
-                >
-                  {showRecurringManager ? 'إغلاق اللوحة ✖' : 'فتح لوحة الإدارة ⚙️'}
-                </button>
-              </div>
-
+            </details>
+            <details className="settings-section" open={showRecurringManager} onToggle={e => setShowRecurringManager(e.currentTarget.open)}><summary>الفواتير المتكررة<span>{recurringBills.length} فاتورة مسجلة</span></summary>
               <p className="text-[10px] text-[#7a6a52] leading-relaxed">
                 حدد الفواتير الثابتة مثل الإيجار، الكهرباء، والاشتراكات الشهرية لكي يقترح التطبيق تسجيلها تلقائيًا بنقرة واحدة في بداية كل دورة مالية.
               </p>
 
-              {(showRecurringManager || showRecurringManager) && (
+              {showRecurringManager && (
                 <div className="space-y-4 pt-2 border-t border-dashed border-[#ddd0b8]">
                   {/* Add form */}
                   <div className="bg-orange-50/40 p-3 rounded-xl border border-amber-100 space-y-2.5">
@@ -3732,14 +3673,29 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   </div>
                 </div>
               )}
-            </div>
 
-            {/* Backups & External Data store Sync components */}
-            <div className="bg-white rounded-2xl p-5 border border-[#e8dcc8] shadow-sm space-y-4">
-              <h3 className="text-xs font-black text-[#2c1f0e] flex items-center gap-2 pb-2 border-b border-[#e8dcc8]">
-                <Database className="w-4 h-4 text-[#e67e22]" />
-                البيانات والنسخ والتحميل المتبادل
-              </h3>
+            </details>
+            <details className="settings-section"><summary>البيانات والمزامنة<span>التصدير، الاستيراد والإعدادات الافتراضية</span></summary>
+              {/* Toggle Real-time instant sync */}
+              <div className="flex items-center justify-between gap-4 py-3 border-b border-dashed border-[#e8dcc8]">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center text-indigo-600 shrink-0">
+                    <RefreshCw className="w-4 h-4 animate-pulse" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-[#2c1f0e] block">المزامنة الفورية</span>
+                    <span className="text-[10px] text-[#7a6a52] block mt-0.5">تحديث الأجهزة المفتوحة عند تغيّر البيانات</span>
+                  </div>
+                </div>
+                <button
+                  type="button" role="switch" aria-label="المزامنة الفورية" aria-checked={settings.realTimeSync}
+                  onClick={() => handleUpdateSetting('realTimeSync', !settings.realTimeSync)}
+                  className={`w-12 h-[26px] rounded-full p-0.5 cursor-pointer flex items-center transition-colors duration-300 ${settings.realTimeSync ? 'bg-[#0a7c6b]' : 'bg-[#e4e4e7]'}`}
+                  style={{ direction: 'ltr' }}
+                >
+                  <div className={`w-[22px] h-[22px] rounded-full bg-white shadow-md transform transition-transform duration-300 ${settings.realTimeSync ? 'translate-x-[22px]' : 'translate-x-0'}`} />
+                </button>
+              </div>
 
               <p className="text-[10px] text-[#7a6a52] leading-relaxed">
                 يمكنك تصدير معاملاتك وفواتيرك كملف JSON واستيرادها لاحقًا. الملف يحتوي على بياناتك المالية بصيغة مقروءة.
@@ -3752,7 +3708,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   className="py-2.5 bg-orange-50 hover:bg-orange-100/50 border border-orange-200 text-[#e67e22] text-xs font-bold rounded-lg transition-all text-center flex items-center justify-center gap-1.5"
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  <span>⬆️ استيراد من ملف JSON</span>
+                  <span>استيراد ملف</span>
                 </button>
                 <input
                   type="file"
@@ -3769,7 +3725,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   className="py-2.5 bg-emerald-50 hover:bg-emerald-100/50 border border-emerald-200 text-emerald-800 text-xs font-bold rounded-lg transition-all text-center flex items-center justify-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>⬇️ تصدير ميزانيتي كـ JSON</span>
+                  <span>تصدير الدفتر</span>
                 </button>
               </div>
 
@@ -3779,30 +3735,25 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                 onClick={handleResetSettings}
                 className="w-full text-center py-2 border border-[#ddd0b8] hover:border-[#0a7c6b] rounded-lg text-xs font-bold text-[#7a6a52] transition-all bg-[#fafafa]"
               >
-                🔄 استعادة الإعدادات الافتراضية
+                استعادة الإعدادات الافتراضية
               </button>
-            </div>
 
-            {/* Danger zone actions */}
-            <div className="bg-red-50/50 rounded-2xl p-5 border border-red-200 shadow-sm space-y-4">
-              <h3 className="text-xs font-black text-red-700 flex items-center gap-2 pb-2 border-b border-red-200">
-                <ShieldAlert className="w-4 h-4 text-red-600" />
-                خيارات منطقة الخطر
-              </h3>
-
+            </details>
+            <details className="settings-section settings-danger"><summary>مسح المعاملات<span>حذف معاملات الدفتر الشخصي</span></summary>
               <p className="text-[10px] text-[#7a6a52] leading-relaxed">
-                مسح كل المصاريف والمعاملات المسجلة لحسابك بالكامل نهائياً. لا يمكن التراجع عن هذا الإجراء!
+                يحذف معاملات الدفتر الشخصي نهائيًا. صدّر نسخة قبل الحذف؛ لا يشمل دفاتر العائلة.
               </p>
 
               <button
                 onClick={handleClearAllData}
                 className="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-black shadow-md transition-all"
               >
-                🗑️ تصفية ومسح كافة البيانات
+                مسح المعاملات الشخصية
               </button>
-            </div>
 
-          </div>
+            </details>
+            </fieldset>
+          </section>
         )}
 
         {activeTab === 'admin' && currentUser?.isPlatformAdmin && (
