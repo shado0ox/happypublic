@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+*.log
+
+# Exclude runtime data and secrets
+data
+backups
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+albait.json
+albait.json.*
+albait_edit.json

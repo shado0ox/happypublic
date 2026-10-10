@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  happy-home-app:
+    build: .
+    container_name: happy-home-app
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/albait.db
+    volumes:
+      - /mnt/ssd/projects/happyhome/happypublic/data:/app/data/
+    restart: always

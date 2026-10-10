@@ -20,6 +20,7 @@ import {
   Trash2,
   Settings,
   User,
+  Users,
   Share2,
   Download,
   Upload,
@@ -58,6 +59,7 @@ import {
   Tooltip as RechartsTooltip
 } from 'recharts';
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
+import FamilyWorkspace from './components/FamilyWorkspace';
 import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
 // @ts-ignore
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
@@ -90,6 +92,8 @@ interface RecurringBill {
 }
 
 interface UserProfile {
+  token?: string;
+  isPlatformAdmin?: boolean;
   uid: string;
   email: string;
   name: string;
@@ -131,7 +135,7 @@ const MOTIVATIONS = [
 
 export default function App() {
   // Navigation & Screens state
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'income' | 'expense' | 'statement' | 'settings' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'income' | 'expense' | 'statement' | 'settings' | 'admin' | 'family'>('dashboard');
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   
   // Auth Form State
@@ -251,11 +255,8 @@ export default function App() {
   const importInputRef = useRef<HTMLInputElement>(null);
 
   // Admin stats state
-  const [adminUsers, setAdminUsers] = useState<UserProfile[]>([]);
-  const [adminTxns, setAdminTxns] = useState<Transaction[]>([]);
+  const [adminStats, setAdminStats] = useState({ userCount: 0, transactionCount: 0, recurringBillCount: 0 });
   const [adminLoading, setAdminLoading] = useState(false);
-  const [adminSelectedUser, setAdminSelectedUser] = useState<UserProfile | null>(null);
-  const [adminUserTxns, setAdminUserTxns] = useState<Transaction[]>([]);
 
   // Canvas Reference for Statement Image generation
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -331,12 +332,15 @@ export default function App() {
     if (!currentUser || !settings.realTimeSync) return;
 
     console.log('Establishing Real-time Live Sync session via EventSource...');
-    const eventSource = new EventSource(`/api/sync/stream?uid=${encodeURIComponent(currentUser.uid)}&token=${encodeURIComponent(currentUser.token || '')}`);
-
-    eventSource.onmessage = async (event) => {
+    let disposed = false;
+    let eventSource: EventSource | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    const onMessage = async (event: MessageEvent) => {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'sync_required') {
+          window.dispatchEvent(new Event('happy-home-family-sync'));
           console.log('⚡ Real-time sync update triggered from server!');
           await fetchTransactions(currentUser.uid);
           await fetchRecurringBills(currentUser.uid);
@@ -371,15 +375,42 @@ export default function App() {
       }
     };
 
-    eventSource.onerror = (err) => {
-      console.warn('Real-time EventSource disconnected. Reconnecting...', err);
+    const connect = async () => {
+      try {
+        const response = await fetch('/api/sync/ticket', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
+        });
+        if (disposed || checkAuthStatus(response.status)) return;
+        if (!response.ok) throw new Error('Unable to create sync ticket');
+        const { ticket } = await response.json();
+        if (disposed) return;
+        eventSource = new EventSource(`/api/sync/stream?ticket=${encodeURIComponent(ticket)}`);
+        eventSource.onmessage = onMessage;
+        eventSource.onerror = () => {
+          eventSource?.close();
+          if (!disposed) reconnectTimer = setTimeout(connect, 3000);
+        };
+      } catch {
+        if (!disposed) reconnectTimer = setTimeout(connect, 3000);
+      }
     };
-
+    void connect();
     return () => {
-      console.log('Closing live sync EventSource session.');
-      eventSource.close();
+      disposed = true;
+      controller.abort();
+      clearTimeout(reconnectTimer);
+      eventSource?.close();
     };
   }, [currentUser, settings.realTimeSync]);
+
+  const getSessionToken = (uid: string) => {
+    try {
+      const cached = JSON.parse(localStorage.getItem('albait_user') || '{}');
+      if (cached.uid === uid && cached.token) return cached.token as string;
+    } catch { /* Invalid cache must not grant access. */ }
+    return currentUser?.uid === uid ? currentUser.token || '' : '';
+  };
 
   // Helper functions for Offline Synchronization Queue
   const getPendingOps = (uid: string): any[] => {
@@ -406,7 +437,7 @@ export default function App() {
 
     console.log(`Processing ${ops.length} pending offline operations for user: ${uid}...`);
     const remainingOps = [...ops];
-    const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
+    const token = getSessionToken(uid);
 
     for (const op of ops) {
       try {
@@ -554,8 +585,8 @@ export default function App() {
     try {
       const res = await fetch('/api/user/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(profile)
+        headers: { 'Content-Type': 'application/json', 'x-user-uid': profile.uid, 'x-auth-token': profile.token || '' },
+        body: JSON.stringify({})
       });
       if (checkAuthStatus(res.status)) return;
       if (!res.ok) {
@@ -568,8 +599,9 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         if (data.user) {
-          setCurrentUser(data.user);
-          localStorage.setItem('albait_user', JSON.stringify(data.user));
+          const syncedProfile = { ...data.user, token: profile.token };
+          setCurrentUser(syncedProfile);
+          localStorage.setItem('albait_user', JSON.stringify(syncedProfile));
         }
         if (data.settings) {
           // Setup settings properly converting ints back to booleans
@@ -596,7 +628,7 @@ export default function App() {
 
   const fetchTransactions = async (uid: string) => {
     try {
-      const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
+      const token = getSessionToken(uid);
       const res = await fetch(`/api/transactions?uid=${uid}`, {
         headers: {
           'x-user-uid': uid,
@@ -628,7 +660,7 @@ export default function App() {
 
   const fetchRecurringBills = async (uid: string) => {
     try {
-      const token = currentUser?.token || (JSON.parse(localStorage.getItem('albait_user') || '{}').token) || '';
+      const token = getSessionToken(uid);
       const res = await fetch(`/api/recurring-bills?uid=${uid}`, {
         headers: {
           'x-user-uid': uid,
@@ -853,7 +885,7 @@ export default function App() {
           return;
         }
 
-        const profile: UserProfile = data.user;
+        const profile: UserProfile = { ...data.user, token: data.token || data.sessionToken };
         localStorage.setItem('albait_user', JSON.stringify(profile));
         setCurrentUser(profile);
 
@@ -901,7 +933,7 @@ export default function App() {
           return;
         }
 
-        const profile: UserProfile = data.user;
+        const profile: UserProfile = { ...data.user, token: data.token || data.sessionToken };
         localStorage.setItem('albait_user', JSON.stringify(profile));
         setCurrentUser(profile);
 
@@ -1195,7 +1227,7 @@ export default function App() {
               localStorage.setItem('albait_bio_users', JSON.stringify(updated));
             }
 
-            const profile: UserProfile = data.user;
+            const profile: UserProfile = { ...data.user, token: data.token || data.sessionToken };
             localStorage.setItem('albait_user', JSON.stringify(profile));
             setCurrentUser(profile);
 
@@ -1228,8 +1260,26 @@ export default function App() {
     }, 60);
   };
 
-  const handleLogout = () => {
-    if (confirm('هل تريد تسجيل الخروج؟')) {
+  const handleLogout = async () => {
+    if (currentUser && confirm('هل تريد تسجيل الخروج؟')) {
+      try {
+        const response = await fetch('/api/user/logout', {
+          method: 'POST',
+          headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
+        });
+        if (!response.ok && response.status !== 401) throw new Error('Unable to revoke session');
+      } catch {
+        triggerToast('تعذر إلغاء جلسة السيرفر؛ حاول تسجيل الخروج عند الاتصال', true);
+        return;
+      }
+      localStorage.removeItem(`albait_txs_${currentUser.uid}`);
+      localStorage.removeItem(`albait_bills_${currentUser.uid}`);
+      const enrolled = { ...enrolledBioUsers };
+      delete enrolled[currentUser.email.trim().toLowerCase()];
+      setEnrolledBioUsers(enrolled);
+      localStorage.setItem('albait_bio_users', JSON.stringify(enrolled));
+      delete (window as any)._temp_bio_cred;
+      setRecurringBills([]);
       localStorage.removeItem('albait_user');
       localStorage.removeItem('albait_locked');
       setCurrentUser(null);
@@ -1302,15 +1352,16 @@ export default function App() {
     await executeSaveIncome(val, incomeSource, incomeNote);
   };
 
-  const handleVoiceApplyIncome = async (parsed: VoiceParsedResult) => {
-    if (!parsed.amount) return;
-    const finalSource = parsed.categoryOrSource || incomeSource;
+   
+   const handleVoiceApplyIncome = async (parsed: VoiceParsedResult) => {
+  if (!parsed.amount) return;
+    const finalSource = normalizeSource(parsed.categoryOrSource) || incomeSource;
     const finalNote = parsed.note || '';
     setIncomeAmount(String(parsed.amount));
     setIncomeSource(finalSource);
     setIncomeNote(finalNote);
     await executeSaveIncome(parsed.amount, finalSource, finalNote);
-  };
+    };
 
   const executeSaveExpense = async (amountVal: number, categoryVal: string, noteVal: string) => {
     if (!currentUser) return;
@@ -1374,17 +1425,18 @@ export default function App() {
     await executeSaveExpense(val, expenseCategory, expenseDesc);
   };
 
-  const handleVoiceApplyExpense = async (parsed: VoiceParsedResult) => {
+   const handleVoiceApplyExpense = async (parsed: VoiceParsedResult) => {
     if (!parsed.amount) return;
-    const finalCategory = parsed.categoryOrSource || expenseCategory;
-    const finalNote = parsed.note || '';
-    setExpenseAmount(String(parsed.amount));
-    setExpenseCategory(finalCategory);
-    setExpenseDesc(finalNote);
-    await executeSaveExpense(parsed.amount, finalCategory, finalNote);
-  };
+     const finalCategory = normalizeCategory(parsed.categoryOrSource) || expenseCategory;
+     const finalNote = parsed.note || '';
+     setExpenseAmount(String(parsed.amount));
+     setExpenseCategory(finalCategory);
+     setExpenseDesc(finalNote);
+     await executeSaveExpense(parsed.amount, finalCategory, finalNote);
+    };
+ 
 
-  const handleDeleteTxn = async (id: string) => {
+   const handleDeleteTxn = async (id: string) => {
     if (!currentUser) return;
     if (settings.confirmDelete && !confirm('هل أنت متأكد من حذف هذه المعاملة؟')) {
       return;
@@ -1479,10 +1531,26 @@ export default function App() {
   };
 
   // Export JSON Backup file
-  const handleExportJSON = () => {
+  const handleExportJSON = async () => {
     if (!currentUser) return;
-    window.open(`/api/export?uid=${currentUser.uid}&token=${currentUser.token || ''}`, '_blank');
-    triggerToast('⬇️ جاري تحميل ملف النسخة الاحتياطية');
+    try {
+      const response = await fetch('/api/export', {
+        headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
+      });
+      if (checkAuthStatus(response.status)) return;
+      if (!response.ok) throw new Error('Export failed');
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `happy-home-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      triggerToast('تم تحميل النسخة الاحتياطية');
+    } catch {
+      triggerToast('تعذر تنزيل النسخة الاحتياطية', true);
+    }
   };
 
   // Import JSON Backup file
@@ -1508,9 +1576,10 @@ export default function App() {
               'x-auth-token': currentUser.token || ''
             },
             body: JSON.stringify({
-              user: currentUser,
               settings: rawData.settings,
-              transactions: rawData.transactions
+              transactions: rawData.transactions,
+              recurring_bills: rawData.recurring_bills,
+              mode: 'merge'
             })
           });
           if (checkAuthStatus(res.status)) return;
@@ -1518,8 +1587,10 @@ export default function App() {
           if (status.success) {
             triggerToast(`✅ تم استيراد بنجاح ${status.count} معاملة مدمجة!`);
             await fetchTransactions(currentUser.uid);
+            await fetchRecurringBills(currentUser.uid);
+            await syncUserAndFetch(currentUser);
           } else {
-            triggerToast('خطأ في معالجة ملف الاستيراد', true);
+            triggerToast(status.error || 'خطأ في معالجة ملف الاستيراد', true);
           }
         } else {
           triggerToast('ملف التصدير هذا غير صالح أو لا يحتوي على كشف حساب', true);
@@ -1927,9 +1998,11 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
   // Helper to handle response auth errors (401/403) and log out/redirect to login page
   const checkAuthStatus = (status: number) => {
-    if (status === 401 || status === 403) {
+    if (status === 401) {
       localStorage.removeItem('albait_user');
       setCurrentUser(null);
+      setTransactions([]);
+      setRecurringBills([]);
       triggerToast('انتهت صلاحية الجلسة، يرجى تسجيل الدخول مجدداً 🔒', true);
       return true;
     }
@@ -1949,92 +2022,21 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
     });
   };
 
-  // Admin section fetchers
   const fetchAdminStats = async () => {
-    if (!currentUser || currentUser.email !== 'shady.nasif@gmail.com') return;
+    if (!currentUser?.isPlatformAdmin) return;
     setAdminLoading(true);
     try {
-      const res = await fetch('/api/admin/stats', {
-        headers: {
-          'x-admin-email': currentUser.email,
-          'x-user-uid': currentUser.uid,
-          'x-auth-token': currentUser.token || ''
-        }
+      const response = await fetch('/api/admin/stats', {
+        headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
       });
-      if (checkAuthStatus(res.status)) return;
-      const data = await res.json();
-      if (data.users && data.transactions) {
-        setAdminUsers(data.users);
-        setAdminTxns(data.transactions);
-      }
-    } catch (e: any) {
-      triggerToast('فشل تحميل معلومات لوحة المشرف ' + e.message, true);
+      if (checkAuthStatus(response.status)) return;
+      if (!response.ok) throw new Error('Forbidden');
+      setAdminStats(await response.json());
+    } catch {
+      triggerToast('تعذر تحميل إحصاءات المنصة', true);
     } finally {
       setAdminLoading(false);
     }
-  };
-
-  // Admin deletes single txn
-  const handleAdminDeleteTxn = async (txnId: string) => {
-    if (!currentUser) return;
-    if (!confirm('⚠️ مشرف: هل تريد حذف هذه المعاملة المحددة نهائياً من السجلات؟')) return;
-
-    try {
-      const res = await fetch('/api/admin/delete-txn', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-email': currentUser.email,
-          'x-user-uid': currentUser.uid,
-          'x-auth-token': currentUser.token || ''
-        },
-        body: JSON.stringify({ txnId })
-      });
-      if (checkAuthStatus(res.status)) return;
-      const status = await res.json();
-      if (status.success) {
-        triggerToast('👑 مشرف: تم الحذف بنجاح');
-        await fetchAdminStats();
-        // Hide modal
-        setAdminSelectedUser(null);
-      }
-    } catch (e: any) {
-      triggerToast('فشل تواصل الخادم: ' + e.message, true);
-    }
-  };
-
-  // Admin clear user completely
-  const handleAdminClearUser = async (targetUid: string) => {
-    if (!currentUser) return;
-    if (!confirm('⚠️ مشرف: سيتم مسح كافة سجلات معاملات هذا المستخدم بالكامل نهائياً؟')) return;
-
-    try {
-      const res = await fetch('/api/admin/clear-user', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-email': currentUser.email,
-          'x-user-uid': currentUser.uid,
-          'x-auth-token': currentUser.token || ''
-        },
-        body: JSON.stringify({ targetUid })
-      });
-      if (checkAuthStatus(res.status)) return;
-      const status = await res.json();
-      if (status.success) {
-        triggerToast('👑 مشرف: تم تصفية كافة السجلات');
-        await fetchAdminStats();
-        setAdminSelectedUser(null);
-      }
-    } catch (e: any) {
-      triggerToast('خطأ: ' + e.message, true);
-    }
-  };
-
-  const handleOpenAdminUserModal = (user: UserProfile) => {
-    const userRecords = adminTxns.filter(t => t.uid === user.uid);
-    setAdminSelectedUser(user);
-    setAdminUserTxns(userRecords);
   };
 
   // Days left indicator
@@ -2233,13 +2235,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
   // Auth Screen Form
   if (!currentUser) {
     return (
-      <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen relative flex items-center justify-center p-4 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#e67e22] font-sans ${isRTL ? 'text-right' : 'text-left'}`}>
+      <div dir={isRTL ? 'rtl' : 'ltr'} className={`home-auth min-h-screen relative flex items-center justify-center p-4 font-sans ${isRTL ? 'text-right' : 'text-left'}`}>
         
         {/* Soft background glow circles */}
         <div className="absolute top-10 left-10 w-48 h-48 rounded-full bg-white/5 blur-xl pointer-events-none" />
         <div className="absolute bottom-10 right-10 w-72 h-72 rounded-full bg-white/5 blur-2xl pointer-events-none" />
 
-        <div className="w-full max-w-md bg-white rounded-2xl p-6 md:p-8 shadow-2xl relative overflow-hidden transition-all duration-300">
+        <div className="home-auth-panel w-full max-w-md bg-white p-6 md:p-8 relative overflow-hidden">
           
           {/* Logo Heading banner */}
           <div className="flex flex-col items-center justify-center mb-6 text-center">
@@ -2256,7 +2258,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               />
             </div>
             <h1 className="text-2xl font-black font-display text-[#2c1f0e] mt-2">تطبيق البيت السعيد</h1>
-            <p className="text-[#7a6a52] text-xs font-semibold mt-1">شريكك المالي الذكي لتنظيم ميزانك وادخار للمستقبل</p>
+            <p className="text-[#7a6a52] text-xs font-semibold mt-1">سجّل دخلك ومصروفاتك، وتابع ما يتبقى من ميزانيتك</p>
 
             {/* Quick Beautiful Interactive Toggle for Proposed Logo Preview */}
             <div className="mt-4 px-3 py-1 bg-[#fdfaf2] border border-[#e8dcc8] rounded-full inline-flex items-center gap-2 text-[10px] font-bold text-[#2c1f0e]">
@@ -2367,7 +2369,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               disabled={authLoading}
               className="w-full py-3 bg-gradient-to-r from-[#0a7c6b] to-[#0d8f7c] hover:from-[#085c4f] hover:to-[#0a7c6b] text-white rounded-xl text-sm font-black transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-lg disabled:opacity-50"
             >
-              {authLoading ? 'جاري التحقق...' : authMode === 'login' ? 'تأكيد الدخول الحساب ←' : 'تسجيل وتجهيز الحساب الجديد'}
+              {authLoading ? 'جاري التحقق...' : authMode === 'login' ? 'تسجيل الدخول' : 'إنشاء الحساب'}
             </button>
 
             {authMode === 'login' && (
@@ -2509,16 +2511,16 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
   // Main Verified App Component
   return (
-    <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen bg-[#fef9f0] pb-24 font-sans select-none antialiased ${isRTL ? 'text-right' : 'text-left'}`}>
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={`home-app min-h-screen pb-24 font-sans antialiased ${isRTL ? 'text-right' : 'text-left'}`}>
       
       {/* Hidden layout canvas for image drawing exports */}
       <canvas ref={canvasRef} className="hidden" />
 
       {/* Header Sticky Top Bar */}
-      <header className="sticky top-0 z-40 bg-white border-b border-[#e8dcc8] shadow-sm px-4 py-3 flex items-center justify-between">
+      <header className="home-header sticky top-0 z-40 bg-white px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#0a7c6b] to-[#e67e22] flex items-center justify-center shadow-sm">
-            <span className="text-white text-base">🏠</span>
+          <div className="w-9 h-9 rounded-lg bg-[#0a7c6b] text-white flex items-center justify-center">
+            <Home className="w-5 h-5" aria-hidden="true" />
           </div>
           <div>
             <h1 className="text-base font-black text-[#2c1f0e] font-display">البيت السعيد</h1>
@@ -2550,7 +2552,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
       </header>
 
       {/* Main Container Views switcher */}
-      <main className="max-w-md mx-auto p-4 space-y-4">
+      <main className="home-content mx-auto p-4 space-y-4">
+        <div className="family-switch" role="group" aria-label={isRTL ? 'نوع الدفتر' : 'Ledger type'}>
+          <button type="button" aria-pressed={activeTab !== 'family'} onClick={() => setActiveTab('dashboard')}>{isRTL ? 'دفتر شخصي' : 'Personal ledger'}</button>
+          <button type="button" aria-pressed={activeTab === 'family'} onClick={() => setActiveTab('family')}>{isRTL ? 'دفاتر العائلة' : 'Family ledgers'}</button>
+        </div>
+        {activeTab === 'family' && <FamilyWorkspace key={currentUser.uid} uid={currentUser.uid} token={getSessionToken(currentUser.uid)} isRTL={isRTL} onExpired={() => { checkAuthStatus(401); }} />}
+
 
         {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
         <AnimatePresence>
@@ -2622,7 +2630,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
                 <div className="text-[9px] text-[#ffdcb3] font-bold text-center pt-1 border-t border-white/10 flex items-center justify-center gap-1">
                   <span>✨</span>
-                  <span>يوفر لك التطبيق المحمول المثبّت سرعة تشغيل مضاعفة بنسبة 200% بدون تحميل متصفح!</span>
+                  <span>افتح التطبيق مباشرة من الشاشة الرئيسية بعد تثبيته</span>
                 </div>
               </div>
 
@@ -2635,7 +2643,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           <div className="space-y-4">
             
             {/* Elegant Main Balance Banner */}
-            <div className="bg-gradient-to-br from-[#0a7c6b] via-[#0d9b87] to-[#f0a04a] text-white rounded-2xl p-5 shadow-xl relative overflow-hidden">
+            <div className="home-balance text-white p-5 relative overflow-hidden">
               <div className="absolute top-0 left-0 w-32 h-32 rounded-full bg-white/5 -translate-x-10 -translate-y-10" />
               
               <div className="relative">
@@ -3734,7 +3742,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               </h3>
 
               <p className="text-[10px] text-[#7a6a52] leading-relaxed">
-                يمكنك تصدير كشف حسابك الموثق بالكامل كملف JSON مشفر، أو استيراده وتغذيته بأي جهاز آخر فوراً.
+                يمكنك تصدير معاملاتك وفواتيرك كملف JSON واستيرادها لاحقًا. الملف يحتوي على بياناتك المالية بصيغة مقروءة.
               </p>
 
               <div className="grid grid-cols-2 gap-3 pt-1">
@@ -3797,88 +3805,17 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           </div>
         )}
 
-        {/* Administrator dashboard panel */}
-        {activeTab === 'admin' && currentUser?.email === 'shady.nasif@gmail.com' && (
-          <div className="space-y-4">
-            
-            <div className="bg-purple-500 text-white rounded-2xl p-5 shadow-lg relative overflow-hidden">
-              <h2 className="text-base font-black font-display mb-1 flex items-center gap-2">
-                👑 لوحة التحكم والمراقبة النشطة للمشرف
-              </h2>
-              <p className="text-[11px] opacity-90 leading-relaxed">
-                متاح حصرياً للحساب {currentUser.email}. تتيح لك مراقبة إجماليات السيرفر والتحكم في حسابات المستخدمين.
-              </p>
-              
-              <button
-                onClick={fetchAdminStats}
-                disabled={adminLoading}
-                className="mt-4 px-4 py-1.5 bg-white text-purple-700 font-bold rounded-lg text-xs transition-all flex items-center gap-1 hover:bg-purple-100"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${adminLoading ? 'animate-spin' : ''}`} />
-                <span>تحديث وإعادة تحميل إحصائيات النظام</span>
-              </button>
+        {activeTab === 'admin' && currentUser?.isPlatformAdmin && (
+          <div className="bg-white rounded-2xl p-5 border border-[#e8dcc8] space-y-4">
+            <h2 className="text-base font-black">إحصاءات المنصة</h2>
+            <button onClick={fetchAdminStats} disabled={adminLoading} className="px-4 py-2 bg-purple-100 rounded-lg text-purple-700">
+              {adminLoading ? 'جاري التحميل' : 'تحديث الإحصاءات'}
+            </button>
+            <div className="grid grid-cols-3 gap-3 text-center text-xs">
+              <div>المستخدمون<strong className="block text-lg">{adminStats.userCount}</strong></div>
+              <div>المعاملات<strong className="block text-lg">{adminStats.transactionCount}</strong></div>
+              <div>الفواتير المتكررة<strong className="block text-lg">{adminStats.recurringBillCount}</strong></div>
             </div>
-
-            {/* KPI Cards for overall database */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="bg-white rounded-xl p-3 border border-[#e8dcc8] text-center shadow-xs">
-                <span className="text-[10px] text-[#7a6a52] font-bold block">إجمالي عدد المستخدمين</span>
-                <span className="text-xl font-black text-purple-700 block mt-1">{adminUsers.length}</span>
-              </div>
-              <div className="bg-white rounded-xl p-3 border border-[#e8dcc8] text-center shadow-xs">
-                <span className="text-[10px] text-[#7a6a52] font-bold block">إجمالي المعاملات الكلي</span>
-                <span className="text-xl font-black text-purple-700 block mt-1">{adminTxns.length}</span>
-              </div>
-            </div>
-
-            {/* User List view */}
-            <div className="bg-white rounded-2xl p-4 border border-[#e8dcc8] shadow-sm">
-              <h3 className="text-xs font-black text-[#2c1f0e] border-b border-[#e8dcc8] pb-2 mb-3">
-                👥 مستخدمو التطبيق النشطون:
-              </h3>
-
-              <div className="space-y-2.5 max-h-80 overflow-y-auto">
-                {adminUsers.map(user => {
-                  const userRecords = adminTxns.filter(t => t.uid === user.uid);
-                  const userIncome = userRecords.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
-                  const userExpense = userRecords.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
-                  const userBalance = userIncome - userExpense;
-
-                  return (
-                    <div
-                      key={user.uid}
-                      onClick={() => handleOpenAdminUserModal(user)}
-                      className="p-3 bg-[#fdf3e0]/30 hover:bg-[#fdf3e0]/60 border border-[#e8dcc8] rounded-xl flex items-center justify-between cursor-pointer transition-all"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-black text-[#2c1f0e]">{user.name}</span>
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md ${userBalance >= 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-600 border border-red-200'}`}>
-                            الرصيد المتاح: {userBalance.toLocaleString()} {settings.currency}
-                          </span>
-                        </div>
-                        <span className="text-[9.5px] text-[#7a6a52] block mt-0.5">{user.email} · {user.provider}</span>
-                        <span className="text-[9.5px] text-[#7a6a52] block font-semibold mt-0.5">
-                          {userRecords.length} معاملات مسجلة
-                        </span>
-                      </div>
-
-                      <div className="text-left">
-                        <span className="text-xs font-black block text-[#0a7c6b]">+{userIncome.toLocaleString()} {settings.currency}</span>
-                        <span className="text-[10px] font-bold block text-red-500">-{userExpense.toLocaleString()} {settings.currency}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {adminUsers.length === 0 && (
-                  <div className="text-center py-6 text-xs text-[#7a6a52]">
-                    اضغط تحديث لتحديث إحصائيات مستخدمي النظام 📊
-                  </div>
-                )}
-              </div>
-            </div>
-
           </div>
         )}
 
@@ -3894,75 +3831,19 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
       </main>
 
-      {/* Admin User Details Modal Sheet */}
-      {adminSelectedUser && (
-        <div className="fixed inset-0 z-50 bg-[#2c1f0e]/50 backdrop-blur-xs flex items-end justify-center p-4">
-          <div className="bg-white rounded-t-2xl max-w-md w-full p-5 shadow-2xl relative max-h-[80vh] overflow-y-auto">
-            
-            <button
-              onClick={() => setAdminSelectedUser(null)}
-              className="absolute top-4 left-4 w-8 h-8 rounded-full bg-[#fef9f0] hover:bg-orange-50 border border-[#ddd0b8] flex items-center justify-center text-[#7a6a52] transition-all cursor-pointer"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            <h3 className="text-sm font-black text-[#2c1f0e] border-b border-[#e8dcc8] pb-2 mb-4">
-              إدارة معاملات المستخدم: {adminSelectedUser.name}
-            </h3>
-
-            <div className="space-y-3.5">
-              
-              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-center">
-                <span className="text-[10px] uppercase font-bold text-red-700 block">منطقة الإشراف المتميزة</span>
-                <button
-                  onClick={() => handleAdminClearUser(adminSelectedUser.uid)}
-                  className="mt-2.5 w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-black scroll-smooth"
-                >
-                  🗑️ مسح كل معاملات هذا المستخدم بمفردة
-                </button>
-              </div>
-
-              <div className="space-y-2">
-                <span className="text-xs font-black text-[#2c1f0e] block mb-1">📋 آخر العمليات الموثقة بالملف:</span>
-                {adminUserTxns.map(tx => (
-                  <div key={tx.id} className="p-2.5 border border-[#e8dcc8] rounded-lg bg-[#fafafa] flex items-center justify-between text-xs">
-                    <div>
-                      <span className="font-bold text-[#2c1f0e] block">{tx.note || (tx.type === 'income' ? tx.source : tx.category)}</span>
-                      <span className="text-[9.5px] text-[#7a6a52] block mt-0.5">{tx.date} · {tx.type === 'income' ? 'إيراد' : 'منصرف'}</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span className={`font-black ${tx.type === 'income' ? 'text-[#0a7c6b]' : 'text-[#e67e22]'}`}>
-                        {tx.type === 'income' ? '+' : '-'}{tx.amount.toLocaleString()} {settings.currency}
-                      </span>
-                      <button
-                        onClick={() => handleAdminDeleteTxn(tx.id)}
-                        className="p-1 px-1.5 bg-red-50 hover:bg-red-100 rounded text-red-600 text-[10px] font-black"
-                      >
-                        حذف 🗑️
-                      </button>
-                    </div>
-                  </div>
-                ))}
-
-                {adminUserTxns.length === 0 && (
-                  <div className="text-center py-4 text-xs text-[#7a6a52]">
-                    لا توجد معاملات مسجلة لهذا الحساب.
-                  </div>
-                )}
-              </div>
-
-            </div>
-
-          </div>
-        </div>
-      )}
-
       {/* Global Bottom Navigation Sticky Tab bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-[#e8dcc8] shadow-[0_-4px_16px_rgba(44,31,14,0.06)] px-2 py-1.5 pb-safe flex items-center justify-around">
-        
+      <nav aria-label={isRTL ? "التنقل الرئيسي" : "Main navigation"} className="home-nav fixed bottom-0 left-0 right-0 z-40 bg-white px-2 py-1.5 flex items-center justify-around">
+        {activeTab === 'family' ? <>
+          <button type="button" aria-current="page" onClick={() => window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })} className="flex flex-col items-center text-[#0a7c6b]">
+            <Users className="w-5 h-5" /><span>{isRTL ? 'دفاتر العائلة' : 'Family ledgers'}</span>
+          </button>
+          <button type="button" onClick={() => setActiveTab('dashboard')} className="flex flex-col items-center text-[#7a6a52]">
+            <Home className="w-5 h-5" /><span>{isRTL ? 'دفتر شخصي' : 'Personal ledger'}</span>
+          </button>
+        </> : <>
         <button
           onClick={() => setActiveTab('dashboard')}
+          aria-current={activeTab === 'dashboard' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'dashboard' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3977,6 +3858,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('income')}
+          aria-current={activeTab === 'income' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'income' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3991,6 +3873,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('expense')}
+          aria-current={activeTab === 'expense' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'expense' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -4005,6 +3888,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('statement')}
+          aria-current={activeTab === 'statement' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'statement' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -4019,6 +3903,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('settings')}
+          aria-current={activeTab === 'settings' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'settings' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -4031,7 +3916,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           <span className="text-[10px] font-bold mt-1">إعدادات</span>
         </button>
 
-        {currentUser?.email === 'shady.nasif@gmail.com' && (
+        {currentUser?.isPlatformAdmin && (
           <button
             onClick={() => { setActiveTab('admin'); fetchAdminStats(); }}
             className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
@@ -4047,6 +3932,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           </button>
         )}
 
+        </>}
       </nav>
 
       {/* 1. Biometric Scanning Radar Overlay */}

@@ -52,7 +52,9 @@ export const CAT_EMOJIS: Record<string, string> = {
   "other_income": "💰"
 };
 
-// Backward compatibility: normalize old Arabic database entries to standardized IDs
+// Backward compatibility: normalize old Arabic database entries AND
+// English IDs coming from VoiceAssistant.tsx into the standardized IDs
+// that match the keys of CAT_EMOJIS / CAT_COLORS above.
 export const normalizeCategory = (cat: string | null | undefined): string => {
   if (!cat) return 'other';
   const mapping: Record<string, string> = {
