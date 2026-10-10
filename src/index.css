@@ -77,3 +77,35 @@ body { margin: 0; background: var(--home-paper); }
 .animate-spin-slow {
   animation: spin-slow 12s linear infinite;
 }
+
+.family-switch { display: flex; gap: .5rem; padding: .3rem; background: #e3ece7; border-radius: 12px; }
+.family-switch button { flex: 1; min-height: 44px; border-radius: 9px; font-size: 14px; font-weight: 700; }
+.family-switch button[aria-pressed="true"] { background: white; color: var(--home-green); }
+.family-workspace { display: grid; gap: 1rem; }
+.family-heading { display: flex; align-items: flex-start; gap: 1rem; justify-content: space-between; }
+.family-heading h2 { display: flex; align-items: center; gap: .5rem; font-size: 22px; font-weight: 800; }
+.family-workspace p { font-size: 14px; line-height: 1.8; max-width: 70ch; overflow-wrap: anywhere; }
+.family-panel { background: white; border: 1px solid var(--home-line); border-radius: 12px; padding: 1rem; display: grid; gap: .8rem; }
+.family-panel h3, .family-panel summary { font-weight: 800; font-size: 16px; }
+.family-panel summary { cursor: pointer; min-height: 44px; }
+.family-panel form { display: grid; gap: .8rem; }
+.family-field { display: grid; gap: .4rem; font-size: 14px; font-weight: 600; min-width: 0; }
+.family-field input, .family-field select, .family-field textarea, .family-actions select { width: 100%; min-width: 0; border: 1px solid #9aafa5; border-radius: 8px; background: white; color: var(--home-ink); padding: .6rem; min-height: 44px; font-size: 16px; }
+.family-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .8rem; }
+.family-workspace button { display: inline-flex; align-items: center; justify-content: center; gap: .4rem; min-height: 44px; padding: .5rem .75rem; border: 1px solid var(--home-line); border-radius: 8px; font-size: 14px; background: white; }
+.family-workspace button.family-primary { background: var(--home-green); border-color: var(--home-green); color: white; font-weight: 700; }
+.family-workspace button:disabled { opacity: .55; cursor: wait; }
+.family-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.family-summary { padding: 1.3rem; color: white; }
+.family-summary h3 { font-size: 20px; font-weight: 700; }
+.family-summary > strong { display: block; font-size: clamp(24px,6vw,36px); overflow-wrap: anywhere; }
+.family-record { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; flex-wrap: wrap; border-top: 1px solid var(--home-line); padding-block: .8rem; font-size: 14px; overflow-wrap: anywhere; }
+.family-record > div:first-child { display: grid; gap: .3rem; min-width: 0; flex: 1; }
+.family-record span, .family-record time { font-size: 13px; color: var(--home-muted); }
+.family-totals { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; font-size: 14px; }
+.family-totals strong { display: block; font-variant-numeric: tabular-nums; }
+.family-error { border-inline-start: 4px solid #b42318; background: #fff1ef; color: #8c1b13; padding: .8rem; }
+.family-notice { background: #e2f2e7; color: #175b35; padding: .8rem; }
+.family-invite { background: #eef5f1; padding: .8rem; border-radius: 8px; }
+.family-invite code { display: block; overflow-wrap: anywhere; user-select: all; margin-block: .8rem; }
+@media (max-width: 380px) { .family-fields { grid-template-columns: 1fr; } }

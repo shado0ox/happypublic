@@ -1,4 +1,5 @@
 import express from 'express';
+import { mountFamilies } from './server/families';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
@@ -1053,7 +1054,9 @@ async function startServer() {
     }
   });
 
-  // Platform operations receive counts only; family roles will be separate.
+  mountFamilies(app, dbPath, requireAuth, notifySyncClients);
+
+  // Platform operations receive counts only; family roles are separate.
   app.get('/api/admin/stats', requireAdmin, (_req, res) => res.json(db.getAggregateStats()));
   app.post(['/api/admin/clear-user', '/api/admin/delete-txn'], requireAdmin, (_req, res) => {
     res.status(410).json({ error: 'إدارة المنصة لا تملك صلاحية حذف المعاملات الشخصية' });

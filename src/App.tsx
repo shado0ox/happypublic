@@ -20,6 +20,7 @@ import {
   Trash2,
   Settings,
   User,
+  Users,
   Share2,
   Download,
   Upload,
@@ -58,6 +59,7 @@ import {
   Tooltip as RechartsTooltip
 } from 'recharts';
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
+import FamilyWorkspace from './components/FamilyWorkspace';
 import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
 // @ts-ignore
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
@@ -133,7 +135,7 @@ const MOTIVATIONS = [
 
 export default function App() {
   // Navigation & Screens state
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'income' | 'expense' | 'statement' | 'settings' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'income' | 'expense' | 'statement' | 'settings' | 'admin' | 'family'>('dashboard');
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   
   // Auth Form State
@@ -338,6 +340,7 @@ export default function App() {
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'sync_required') {
+          window.dispatchEvent(new Event('happy-home-family-sync'));
           console.log('⚡ Real-time sync update triggered from server!');
           await fetchTransactions(currentUser.uid);
           await fetchRecurringBills(currentUser.uid);
@@ -2516,8 +2519,8 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
       {/* Header Sticky Top Bar */}
       <header className="home-header sticky top-0 z-40 bg-white px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#0a7c6b] to-[#e67e22] flex items-center justify-center shadow-sm">
-            <span className="text-white text-base">🏠</span>
+          <div className="w-9 h-9 rounded-lg bg-[#0a7c6b] text-white flex items-center justify-center">
+            <Home className="w-5 h-5" aria-hidden="true" />
           </div>
           <div>
             <h1 className="text-base font-black text-[#2c1f0e] font-display">البيت السعيد</h1>
@@ -2550,6 +2553,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
       {/* Main Container Views switcher */}
       <main className="home-content mx-auto p-4 space-y-4">
+        <div className="family-switch" role="group" aria-label={isRTL ? 'نوع الدفتر' : 'Ledger type'}>
+          <button type="button" aria-pressed={activeTab !== 'family'} onClick={() => setActiveTab('dashboard')}>{isRTL ? 'دفتر شخصي' : 'Personal ledger'}</button>
+          <button type="button" aria-pressed={activeTab === 'family'} onClick={() => setActiveTab('family')}>{isRTL ? 'دفاتر العائلة' : 'Family ledgers'}</button>
+        </div>
+        {activeTab === 'family' && <FamilyWorkspace key={currentUser.uid} uid={currentUser.uid} token={getSessionToken(currentUser.uid)} isRTL={isRTL} onExpired={() => { checkAuthStatus(401); }} />}
+
 
         {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
         <AnimatePresence>
@@ -3824,7 +3833,14 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
       {/* Global Bottom Navigation Sticky Tab bar */}
       <nav aria-label={isRTL ? "التنقل الرئيسي" : "Main navigation"} className="home-nav fixed bottom-0 left-0 right-0 z-40 bg-white px-2 py-1.5 flex items-center justify-around">
-        
+        {activeTab === 'family' ? <>
+          <button type="button" aria-current="page" onClick={() => window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })} className="flex flex-col items-center text-[#0a7c6b]">
+            <Users className="w-5 h-5" /><span>{isRTL ? 'دفاتر العائلة' : 'Family ledgers'}</span>
+          </button>
+          <button type="button" onClick={() => setActiveTab('dashboard')} className="flex flex-col items-center text-[#7a6a52]">
+            <Home className="w-5 h-5" /><span>{isRTL ? 'دفتر شخصي' : 'Personal ledger'}</span>
+          </button>
+        </> : <>
         <button
           onClick={() => setActiveTab('dashboard')}
           aria-current={activeTab === 'dashboard' ? 'page' : undefined}
@@ -3916,6 +3932,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           </button>
         )}
 
+        </>}
       </nav>
 
       {/* 1. Biometric Scanning Radar Overlay */}
