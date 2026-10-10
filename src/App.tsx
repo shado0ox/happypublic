@@ -2232,13 +2232,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
   // Auth Screen Form
   if (!currentUser) {
     return (
-      <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen relative flex items-center justify-center p-4 bg-gradient-to-br from-[#0a7c6b] via-[#085c4f] to-[#e67e22] font-sans ${isRTL ? 'text-right' : 'text-left'}`}>
+      <div dir={isRTL ? 'rtl' : 'ltr'} className={`home-auth min-h-screen relative flex items-center justify-center p-4 font-sans ${isRTL ? 'text-right' : 'text-left'}`}>
         
         {/* Soft background glow circles */}
         <div className="absolute top-10 left-10 w-48 h-48 rounded-full bg-white/5 blur-xl pointer-events-none" />
         <div className="absolute bottom-10 right-10 w-72 h-72 rounded-full bg-white/5 blur-2xl pointer-events-none" />
 
-        <div className="w-full max-w-md bg-white rounded-2xl p-6 md:p-8 shadow-2xl relative overflow-hidden transition-all duration-300">
+        <div className="home-auth-panel w-full max-w-md bg-white p-6 md:p-8 relative overflow-hidden">
           
           {/* Logo Heading banner */}
           <div className="flex flex-col items-center justify-center mb-6 text-center">
@@ -2255,7 +2255,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               />
             </div>
             <h1 className="text-2xl font-black font-display text-[#2c1f0e] mt-2">تطبيق البيت السعيد</h1>
-            <p className="text-[#7a6a52] text-xs font-semibold mt-1">شريكك المالي الذكي لتنظيم ميزانك وادخار للمستقبل</p>
+            <p className="text-[#7a6a52] text-xs font-semibold mt-1">سجّل دخلك ومصروفاتك، وتابع ما يتبقى من ميزانيتك</p>
 
             {/* Quick Beautiful Interactive Toggle for Proposed Logo Preview */}
             <div className="mt-4 px-3 py-1 bg-[#fdfaf2] border border-[#e8dcc8] rounded-full inline-flex items-center gap-2 text-[10px] font-bold text-[#2c1f0e]">
@@ -2366,7 +2366,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               disabled={authLoading}
               className="w-full py-3 bg-gradient-to-r from-[#0a7c6b] to-[#0d8f7c] hover:from-[#085c4f] hover:to-[#0a7c6b] text-white rounded-xl text-sm font-black transition-all hover:-translate-y-0.5 active:translate-y-0 shadow-lg disabled:opacity-50"
             >
-              {authLoading ? 'جاري التحقق...' : authMode === 'login' ? 'تأكيد الدخول الحساب ←' : 'تسجيل وتجهيز الحساب الجديد'}
+              {authLoading ? 'جاري التحقق...' : authMode === 'login' ? 'تسجيل الدخول' : 'إنشاء الحساب'}
             </button>
 
             {authMode === 'login' && (
@@ -2508,13 +2508,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
   // Main Verified App Component
   return (
-    <div dir={isRTL ? 'rtl' : 'ltr'} className={`min-h-screen bg-[#fef9f0] pb-24 font-sans select-none antialiased ${isRTL ? 'text-right' : 'text-left'}`}>
+    <div dir={isRTL ? 'rtl' : 'ltr'} className={`home-app min-h-screen pb-24 font-sans antialiased ${isRTL ? 'text-right' : 'text-left'}`}>
       
       {/* Hidden layout canvas for image drawing exports */}
       <canvas ref={canvasRef} className="hidden" />
 
       {/* Header Sticky Top Bar */}
-      <header className="sticky top-0 z-40 bg-white border-b border-[#e8dcc8] shadow-sm px-4 py-3 flex items-center justify-between">
+      <header className="home-header sticky top-0 z-40 bg-white px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#0a7c6b] to-[#e67e22] flex items-center justify-center shadow-sm">
             <span className="text-white text-base">🏠</span>
@@ -2549,7 +2549,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
       </header>
 
       {/* Main Container Views switcher */}
-      <main className="max-w-md mx-auto p-4 space-y-4">
+      <main className="home-content mx-auto p-4 space-y-4">
 
         {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
         <AnimatePresence>
@@ -2621,7 +2621,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
                 <div className="text-[9px] text-[#ffdcb3] font-bold text-center pt-1 border-t border-white/10 flex items-center justify-center gap-1">
                   <span>✨</span>
-                  <span>يوفر لك التطبيق المحمول المثبّت سرعة تشغيل مضاعفة بنسبة 200% بدون تحميل متصفح!</span>
+                  <span>افتح التطبيق مباشرة من الشاشة الرئيسية بعد تثبيته</span>
                 </div>
               </div>
 
@@ -2634,7 +2634,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           <div className="space-y-4">
             
             {/* Elegant Main Balance Banner */}
-            <div className="bg-gradient-to-br from-[#0a7c6b] via-[#0d9b87] to-[#f0a04a] text-white rounded-2xl p-5 shadow-xl relative overflow-hidden">
+            <div className="home-balance text-white p-5 relative overflow-hidden">
               <div className="absolute top-0 left-0 w-32 h-32 rounded-full bg-white/5 -translate-x-10 -translate-y-10" />
               
               <div className="relative">
@@ -3823,10 +3823,11 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
       </main>
 
       {/* Global Bottom Navigation Sticky Tab bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-[#e8dcc8] shadow-[0_-4px_16px_rgba(44,31,14,0.06)] px-2 py-1.5 pb-safe flex items-center justify-around">
+      <nav aria-label={isRTL ? "التنقل الرئيسي" : "Main navigation"} className="home-nav fixed bottom-0 left-0 right-0 z-40 bg-white px-2 py-1.5 flex items-center justify-around">
         
         <button
           onClick={() => setActiveTab('dashboard')}
+          aria-current={activeTab === 'dashboard' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'dashboard' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3841,6 +3842,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('income')}
+          aria-current={activeTab === 'income' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'income' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3855,6 +3857,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('expense')}
+          aria-current={activeTab === 'expense' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'expense' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3869,6 +3872,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('statement')}
+          aria-current={activeTab === 'statement' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'statement' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
@@ -3883,6 +3887,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
         <button
           onClick={() => setActiveTab('settings')}
+          aria-current={activeTab === 'settings' ? 'page' : undefined}
           className={`flex flex-col items-center justify-center p-2 rounded-lg transition-all ${
             activeTab === 'settings' ? 'text-[#0a7c6b]' : 'text-[#7a6a52] hover:text-[#2c1f0e]'
           }`}
