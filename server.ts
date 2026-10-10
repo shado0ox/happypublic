@@ -7,9 +7,12 @@ import crypto from 'crypto';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import Database from 'better-sqlite3';
+import { HttpError, object, text, integer, email as normalizeEmail, transactionInput, billInput, settingsInput } from './server/security';
 
 // Global Constants
-const ADMIN_EMAIL = 'shady.nasif@gmail.com';
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const hashToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
+const newToken = () => crypto.randomBytes(32).toString('hex');
 
 // Types
 interface User {
@@ -147,11 +150,22 @@ class SQLiteDatabase {
         createdAt INTEGER NOT NULL,
         FOREIGN KEY (uid) REFERENCES users (uid) ON DELETE CASCADE
       );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS sessions_uid ON sessions(uid);
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version TEXT PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      );
     `);
 
     // Run Migration from JSON if JSON file exists and has data
     const jsonPath = path.join(path.dirname(this.filePath), 'albait.json');
-    if (fs.existsSync(jsonPath)) {
+    if (process.env.ENABLE_LEGACY_JSON_MIGRATION === 'true' && fs.existsSync(jsonPath)) {
       try {
         console.log(`Found legacy albait.json database. Migrating to SQLite...`);
         const fileContent = fs.readFileSync(jsonPath, 'utf-8');
@@ -222,14 +236,26 @@ class SQLiteDatabase {
         fs.renameSync(jsonPath, backupPath);
         console.log(`Backed up legacy JSON to ${backupPath}`);
       } catch (err) {
-        console.error(`Migration from JSON database failed:`, err);
+        throw new Error('Legacy JSON migration failed; existing database was not replaced', { cause: err });
       }
     }
+
+    // Old tokens were exposed by the unauthenticated profile-sync endpoint.
+    // Revoke only once; preserve all users, passwords and financial records.
+    this.db.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?').get('secure-sessions-v1')) {
+        this.db.prepare('UPDATE users SET token = NULL').run();
+        this.db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run('secure-sessions-v1', Date.now());
+      }
+    })();
   }
 
   // User queries
   getUser(uid: string, token: string): User | null {
-    const row = this.db.prepare(`SELECT * FROM users WHERE uid = ? AND token = ?`).get(uid, token) as any;
+    const row = this.db.prepare(`
+      SELECT users.* FROM users JOIN sessions ON sessions.uid = users.uid
+      WHERE users.uid = ? AND sessions.token_hash = ? AND sessions.expires_at > ?
+    `).get(uid, hashToken(token), Date.now()) as any;
     if (!row) return null;
     return {
       uid: row.uid,
@@ -276,21 +302,6 @@ class SQLiteDatabase {
     };
   }
 
-  getAllUsers(): User[] {
-    const rows = this.db.prepare(`SELECT * FROM users`).all() as any[];
-    return rows.map(row => ({
-      uid: row.uid,
-      email: row.email,
-      name: row.name,
-      password: row.password || undefined,
-      lastLogin: row.lastLogin,
-      provider: row.provider,
-      createdAt: row.createdAt,
-      token: row.token || undefined,
-      seeded: !!row.seeded
-    }));
-  }
-
   createUser(user: User) {
     this.db.prepare(`
       INSERT INTO users (uid, email, name, password, lastLogin, provider, createdAt, token, seeded)
@@ -316,8 +327,62 @@ class SQLiteDatabase {
     );
   }
 
-  updateUserTokenAndLogin(uid: string, token: string, lastLogin: number) {
-    this.db.prepare(`UPDATE users SET token = ?, lastLogin = ? WHERE uid = ?`).run(token, lastLogin, uid);
+  registerUser(user: User) {
+    return this.db.transaction(() => {
+      if (this.getUserByEmail(user.email)) throw new HttpError(409, 'البريد الإلكتروني مسجل بالفعل');
+      this.createUser(user);
+      this.saveSettings(getDefaultSettings(user.uid));
+      return this.issueSession(user.uid);
+    })();
+  }
+
+  issueSession(uid: string): string {
+    const token = newToken();
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+      this.db.prepare('INSERT INTO sessions VALUES (?, ?, ?)').run(hashToken(token), uid, Date.now() + SESSION_TTL_MS);
+      this.db.prepare('UPDATE users SET lastLogin = ?, token = NULL WHERE uid = ?').run(Date.now(), uid);
+    })();
+    return token;
+  }
+
+  revokeSession(token: string) {
+    this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token));
+  }
+
+  rotateSession(uid: string, oldToken: string): string {
+    return this.db.transaction(() => {
+      if (!this.getUser(uid, oldToken)) throw new HttpError(401, 'الجلسة منتهية');
+      this.revokeSession(oldToken);
+      return this.issueSession(uid);
+    })();
+  }
+
+  restoreUserBundle(uid: string, settings: Setting | undefined, txs: Transaction[] | undefined, bills: RecurringBill[] | undefined, replace: boolean) {
+    this.db.transaction(() => {
+      // Check collisions before removing anything, including the caller's rows.
+      for (const tx of txs ?? []) {
+        const owner = this.db.prepare('SELECT uid FROM transactions WHERE id = ?').get(tx.id) as any;
+        if (owner && owner.uid !== uid) throw new HttpError(404, 'السجل غير متاح');
+      }
+      for (const bill of bills ?? []) {
+        const owner = this.db.prepare('SELECT uid FROM recurring_bills WHERE id = ?').get(bill.id) as any;
+        if (owner && owner.uid !== uid) throw new HttpError(404, 'السجل غير متاح');
+      }
+      if (settings) this.saveSettings(settings);
+      if (replace && txs) this.deleteAllTransactionsForUser(uid);
+      if (replace && bills) this.db.prepare('DELETE FROM recurring_bills WHERE uid = ?').run(uid);
+      for (const tx of txs ?? []) this.saveTransaction(tx);
+      for (const bill of bills ?? []) this.saveRecurringBill(bill);
+    })();
+  }
+
+  getAggregateStats() {
+    return {
+      userCount: (this.db.prepare('SELECT COUNT(*) AS count FROM users').get() as any).count,
+      transactionCount: (this.db.prepare('SELECT COUNT(*) AS count FROM transactions').get() as any).count,
+      recurringBillCount: (this.db.prepare('SELECT COUNT(*) AS count FROM recurring_bills').get() as any).count,
+    };
   }
 
   // Transactions queries
@@ -341,25 +406,8 @@ class SQLiteDatabase {
     }));
   }
 
-  getAllTransactions(): Transaction[] {
-    const rows = this.db.prepare(`SELECT * FROM transactions`).all() as any[];
-    return rows.map(r => ({
-      id: r.id,
-      uid: r.uid,
-      type: r.type,
-      amount: r.amount,
-      source: r.source,
-      category: r.category,
-      date: r.date,
-      note: r.note,
-      createdAt: r.createdAt,
-      userEmail: r.userEmail || '',
-      userName: r.userName || ''
-    }));
-  }
-
-  getTransactionById(id: string): Transaction | null {
-    const r = this.db.prepare(`SELECT * FROM transactions WHERE id = ?`).get(id) as any;
+  getTransactionById(id: string, uid: string): Transaction | null {
+    const r = this.db.prepare(`SELECT * FROM transactions WHERE id = ? AND uid = ?`).get(id, uid) as any;
     if (!r) return null;
     return {
       id: r.id,
@@ -377,7 +425,7 @@ class SQLiteDatabase {
   }
 
   saveTransaction(tx: Transaction) {
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO transactions (id, uid, type, amount, source, category, date, note, createdAt, userEmail, userName)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -387,6 +435,7 @@ class SQLiteDatabase {
         category = excluded.category,
         date = excluded.date,
         note = excluded.note
+      WHERE transactions.uid = excluded.uid
     `).run(
       tx.id,
       tx.uid,
@@ -400,6 +449,7 @@ class SQLiteDatabase {
       tx.userEmail,
       tx.userName
     );
+    if (!result.changes) throw new HttpError(404, 'السجل غير متاح');
   }
 
   deleteTransaction(id: string, uid: string) {
@@ -408,10 +458,6 @@ class SQLiteDatabase {
 
   deleteAllTransactionsForUser(uid: string) {
     this.db.prepare(`DELETE FROM transactions WHERE uid = ?`).run(uid);
-  }
-
-  deleteTransactionAdmin(id: string) {
-    this.db.prepare(`DELETE FROM transactions WHERE id = ?`).run(id);
   }
 
   // Recurring bills
@@ -432,7 +478,7 @@ class SQLiteDatabase {
   }
 
   saveRecurringBill(b: RecurringBill) {
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO recurring_bills (id, uid, title, amount, category, dayOfMonth, createdAt)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
@@ -440,7 +486,9 @@ class SQLiteDatabase {
         amount = excluded.amount,
         category = excluded.category,
         dayOfMonth = excluded.dayOfMonth
+      WHERE recurring_bills.uid = excluded.uid
     `).run(b.id, b.uid, b.title, b.amount, b.category, b.dayOfMonth, b.createdAt);
+    if (!result.changes) throw new HttpError(404, 'السجل غير متاح');
   }
 
   deleteRecurringBill(id: string, uid: string) {
@@ -531,8 +579,11 @@ function getDefaultSettings(uid: string): Setting {
 }
 
 function sanitizeUser(user: User) {
-  const { password, ...safeUser } = user;
-  return safeUser;
+  return {
+    uid: user.uid, email: user.email, name: user.name, provider: user.provider,
+    lastLogin: user.lastLogin, createdAt: user.createdAt,
+    isPlatformAdmin: !!process.env.PLATFORM_ADMIN_UID && user.uid === process.env.PLATFORM_ADMIN_UID,
+  };
 }
 
 async function startServer() {
@@ -548,19 +599,20 @@ async function startServer() {
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-user-uid, x-auth-token, x-admin-email');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-user-uid, x-auth-token');
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
     }
     next();
   });
 
-  app.use(express.json());
+  app.use(express.json({ limit: '2mb' }));
 
   // Connection tracking for Real-time Device-to-Device Sync
   interface SyncClient {
     id: string;
     uid: string;
+    token: string;
     res: any;
   }
   let syncClients: SyncClient[] = [];
@@ -569,6 +621,7 @@ async function startServer() {
     const clients = syncClients.filter(c => c.uid === uid);
     console.log(`Broadcasting sync event to ${clients.length} clients for user ${uid}`);
     clients.forEach(client => {
+      if (!db.getUser(client.uid, client.token)) return client.res.end();
       try {
         client.res.write(`data: ${JSON.stringify({ type: 'sync_required' })}\n\n`);
       } catch (e) {
@@ -584,10 +637,10 @@ async function startServer() {
 
   // Middlewares
   const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const uid = (req.headers['x-user-uid'] as string) || (req.query.uid as string);
-    const token = (req.headers['x-auth-token'] as string) || (req.query.token as string);
+    const uid = req.headers['x-user-uid'];
+    const token = req.headers['x-auth-token'];
 
-    if (!uid || !token) {
+    if (typeof uid !== 'string' || typeof token !== 'string' || !uid || !token) {
       return res.status(401).json({ error: '⚠️ غير مصرح بالدخول: يرجى تسجيل الدخول مجدداً' });
     }
 
@@ -596,14 +649,16 @@ async function startServer() {
       return res.status(401).json({ error: '⚠️ غير مصرح بالدخول: رمز الحماية غير صالح أو منتهي الصلاحية' });
     }
 
+    res.setHeader('Cache-Control', 'no-store');
     (req as any).authUser = user;
+    (req as any).authToken = token;
     next();
   };
 
   const requireAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     requireAuth(req, res, () => {
       const user = (req as any).authUser;
-      if (!user || user.email !== ADMIN_EMAIL) {
+      if (!user || !process.env.PLATFORM_ADMIN_UID || user.uid !== process.env.PLATFORM_ADMIN_UID) {
         return res.status(403).json({ error: 'صلاحيات الأدمن غير متوفرة لهذا الحساب 🔒' });
       }
       next();
@@ -619,65 +674,69 @@ async function startServer() {
     legacyHeaders: false,
   });
 
-  // API - Real-time Device Sync subscription
+  // EventSource cannot send custom headers. Give it a short-lived, one-use
+  // ticket instead of exposing the reusable session token in a URL.
+  const syncTickets = new Map<string, { uid: string; token: string; expiresAt: number }>();
+  app.post('/api/sync/ticket', requireAuth, (req, res) => {
+    const now = Date.now();
+    for (const [ticket, value] of syncTickets) {
+      if (value.expiresAt <= now) syncTickets.delete(ticket);
+    }
+    const uid = (req as any).authUser.uid;
+    for (const [ticket, value] of syncTickets) {
+      if (value.token === (req as any).authToken) syncTickets.delete(ticket);
+    }
+    if (syncTickets.size >= 10000) return res.status(503).json({ error: 'يرجى المحاولة لاحقاً' });
+    const ticket = newToken();
+    syncTickets.set(hashToken(ticket), { uid, token: (req as any).authToken, expiresAt: now + 30000 });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ticket });
+  });
+
   app.get('/api/sync/stream', (req, res) => {
-    const uid = req.query.uid as string;
-    const token = req.query.token as string;
-
-    if (!uid || !token) {
-      res.status(401).send('Authentication credentials are required');
-      return;
+    const ticket = typeof req.query.ticket === 'string' ? req.query.ticket : '';
+    const credentials = syncTickets.get(hashToken(ticket));
+    syncTickets.delete(hashToken(ticket));
+    if (!credentials || credentials.expiresAt <= Date.now() || !db.getUser(credentials.uid, credentials.token)) {
+      return res.status(401).json({ error: 'الجلسة منتهية' });
     }
-
-    const user = db.getUser(uid, token);
-    if (!user) {
-      res.status(401).send('Invalid credentials');
-      return;
-    }
-
-    // Connections limit: Max 5 concurrent connections per user
-    const existingConnectionsCount = syncClients.filter(c => c.uid === uid).length;
-    if (existingConnectionsCount >= 5) {
-      res.status(429).send('Too many active connections for this account');
-      return;
-    }
-
+    const { uid, token } = credentials;
+    if (syncClients.filter(c => c.uid === uid).length >= 5) return res.status(429).end();
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-
-    const clientId = Math.random().toString(36).substring(2);
-    const newClient = { id: clientId, uid, res };
-    syncClients.push(newClient);
-
-    // Write periodic ping to keep the link alive (e.g. proxy connections)
-    const keepAliveInterval = setInterval(() => {
-      try {
-        res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
-      } catch (err) {
-        // Ignored.
-      }
+    const clientId = crypto.randomUUID();
+    syncClients.push({ id: clientId, uid, token, res });
+    const interval = setInterval(() => {
+      if (!db.getUser(uid, token)) return res.end();
+      res.write(`data: ${JSON.stringify({ type: 'ping' })}\n\n`);
     }, 25000);
-
     req.on('close', () => {
-      clearInterval(keepAliveInterval);
+      clearInterval(interval);
       syncClients = syncClients.filter(c => c.id !== clientId);
     });
-
     res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
   });
 
+  app.post('/api/user/logout', requireAuth, (req, res) => {
+    const token = (req as any).authToken;
+    db.revokeSession(token);
+    for (const client of syncClients.filter(c => c.token === token)) client.res.end();
+    res.json({ success: true });
+  });
+
   // API - User Register
-  app.post('/api/user/register', async (req, res) => {
+  app.post('/api/user/register', loginLimiter, async (req, res) => {
     try {
       const { email, name, password } = req.body;
       if (!email || !password || !name) {
         return res.status(400).json({ error: 'الرجاء ملء جميع الحقول المطلوبة للتسجيل' });
       }
 
-      const cleanEmail = email.toLowerCase().trim();
-      const cleanName = name.trim();
+      const cleanEmail = normalizeEmail(email);
+      const cleanName = text(name, 128, true).trim();
+      text(password, 72, true);
+      if (password.length < 8 || Buffer.byteLength(password, 'utf8') > 72) throw new HttpError(400, 'كلمة المرور من 8 أحرف وحتى 72 بايت');
 
       // Check if user already exists
       const existingUser = db.getUserByEmail(cleanEmail);
@@ -686,7 +745,6 @@ async function startServer() {
       }
 
       const uid = crypto.randomUUID(); // Secure generated unique ID
-      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
       const hashedPassword = await bcrypt.hash(password, 10);
 
       // Save user
@@ -697,17 +755,10 @@ async function startServer() {
         password: hashedPassword,
         lastLogin: Date.now(),
         provider: 'email',
-        createdAt: Date.now(),
-        token: sessionToken
+        createdAt: Date.now()
       };
-      db.createUser(newUser);
-
-      // Create settings
-      let userSettings = db.getSettings(uid);
-      if (!userSettings) {
-        userSettings = getDefaultSettings(uid);
-        db.saveSettings(userSettings);
-      }
+      const sessionToken = db.registerUser(newUser);
+      const userSettings = db.getSettings(uid);
 
       res.status(200).json({
         success: true,
@@ -718,8 +769,7 @@ async function startServer() {
       });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -731,21 +781,21 @@ async function startServer() {
         return res.status(400).json({ error: 'الرجاء إدخال البريد الإلكتروني وكلمة المرور' });
       }
 
-      const cleanEmail = email.toLowerCase().trim();
+      const cleanEmail = normalizeEmail(email);
       const user = db.getUserByEmail(cleanEmail);
       if (!user || !user.password) {
         return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
       }
 
+      text(password, 1024, true);
       const isValidPassword = await bcrypt.compare(password, user.password);
       if (!isValidPassword) {
         return res.status(400).json({ error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة' });
       }
 
-      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
+      const sessionToken = db.issueSession(user.uid);
       user.lastLogin = Date.now();
-      user.token = sessionToken;
-      db.updateUserTokenAndLogin(user.uid, sessionToken, user.lastLogin);
+
 
       let userSettings = db.getSettings(user.uid);
       if (!userSettings) {
@@ -762,30 +812,29 @@ async function startServer() {
       });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
   // API - Biometric Login with Token
-  app.post('/api/user/login-with-token', async (req, res) => {
+  app.post('/api/user/login-with-token', loginLimiter, async (req, res) => {
     try {
       const { email, token } = req.body;
       if (!email || !token) {
         return res.status(400).json({ error: 'الرجاء إدخال البريد الإلكتروني والرمز التعريفي' });
       }
 
-      const cleanEmail = email.toLowerCase().trim();
+      const cleanEmail = normalizeEmail(email);
       const user = db.getUserByEmail(cleanEmail);
-      if (!user || user.token !== token) {
+      text(token, 128, true);
+      if (!user || !db.getUser(user.uid, token)) {
         return res.status(401).json({ error: 'رمز الدخول السريع غير صالح أو منتهي الصلاحية' });
       }
 
       user.lastLogin = Date.now();
-      // Rotate token on successful usage for extra security
-      const sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-      user.token = sessionToken;
-      db.updateUserTokenAndLogin(user.uid, sessionToken, user.lastLogin);
+      // Rotate only this device session.
+      const sessionToken = db.rotateSession(user.uid, token);
+
 
       let userSettings = db.getSettings(user.uid);
       if (!userSettings) {
@@ -802,74 +851,15 @@ async function startServer() {
       });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
-  // API - User Sync & Profile Store
-  app.post('/api/user/sync', async (req, res) => {
-    try {
-      const { uid, email, name, provider } = req.body;
-      if (!uid) {
-        return res.status(400).json({ error: 'UID is required' });
-      }
-
-      const cleanEmail = email || `${uid}@albait.local`;
-      const cleanName = name || cleanEmail.split('@')[0] || 'مستخدم البيت';
-
-      // Insert or update user
-      const existingUser = db.getUserByUid(uid);
-      let sessionToken = '';
-      if (existingUser) {
-        if (!existingUser.token) {
-          existingUser.token = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-        }
-        sessionToken = existingUser.token;
-        const updatedUser: User = {
-          ...existingUser,
-          email: cleanEmail,
-          name: cleanName,
-          lastLogin: Date.now(),
-          provider: provider || 'email',
-          token: sessionToken
-        };
-        db.createUser(updatedUser);
-      } else {
-        sessionToken = 'tok_' + Math.random().toString(36).substring(2) + Date.now().toString(36);
-        db.createUser({
-          uid,
-          email: cleanEmail,
-          name: cleanName,
-          lastLogin: Date.now(),
-          provider: provider || 'email',
-          createdAt: Date.now(),
-          token: sessionToken
-        });
-      }
-
-      // Check if user has settings
-      let userSettings = db.getSettings(uid);
-      if (!userSettings) {
-        userSettings = getDefaultSettings(uid);
-        db.saveSettings(userSettings);
-      }
-
-      const userProfile = db.getUserByUid(uid);
-      const finalSettings = db.getSettings(uid);
-
-      res.status(200).json({
-        success: true,
-        user: userProfile ? sanitizeUser(userProfile) : null,
-        settings: finalSettings,
-        token: sessionToken,
-        sessionToken
-      });
-    } catch (e: any) {
-      console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
-    }
+  // Compatibility route for cached clients: identity comes only from auth.
+  app.post('/api/user/sync', requireAuth, (req, res) => {
+    const user = (req as any).authUser as User;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, user: sanitizeUser(user), settings: db.getSettings(user.uid) });
   });
 
   // API - Get User Transactions
@@ -880,8 +870,7 @@ async function startServer() {
       res.status(200).json(txs);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -889,40 +878,20 @@ async function startServer() {
   app.post('/api/transactions', requireAuth, async (req, res) => {
     try {
       const uid = (req as any).authUser.uid;
-      const { id, type, amount, source, category, date, note, userEmail, userName } = req.body;
-
-      if (!id || !type || amount === undefined || !date) {
-        return res.status(400).json({ error: 'Missing required transaction fields' });
-      }
-
-      const parsedAmount = parseFloat(amount);
-      if (isNaN(parsedAmount) || parsedAmount <= 0) {
-        return res.status(400).json({ error: 'المبلغ المدخل غير صالح' });
-      }
-
-      const existingTx = db.getTransactionById(id);
-      const newTx: Transaction = {
-        id,
-        uid,
-        type,
-        amount: parsedAmount,
-        source: source || null,
-        category: category || null,
-        date,
-        note: note || '',
-        createdAt: existingTx ? existingTx.createdAt : Date.now(),
-        userEmail: userEmail || '',
-        userName: userName || ''
-      };
-      db.saveTransaction(newTx);
+      const input = transactionInput(req.body);
+      const user = (req as any).authUser as User;
+      const existingTx = db.getTransactionById(input.id, uid);
+      db.saveTransaction({
+        ...input, uid, createdAt: existingTx?.createdAt ?? Date.now(),
+        userEmail: user.email, userName: user.name,
+      });
 
       notifySyncClients(uid);
-      const saved = db.getTransactionById(id);
+      const saved = db.getTransactionById(input.id, uid);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -935,14 +904,14 @@ async function startServer() {
       if (id === 'all') {
         db.deleteAllTransactionsForUser(uid);
       } else {
+        if (!db.getTransactionById(id, uid)) throw new HttpError(404, 'السجل غير متاح');
         db.deleteTransaction(id, uid);
       }
       notifySyncClients(uid);
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -954,8 +923,7 @@ async function startServer() {
       res.status(200).json(bills);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -963,37 +931,16 @@ async function startServer() {
   app.post('/api/recurring-bills', requireAuth, async (req, res) => {
     try {
       const uid = (req as any).authUser.uid;
-      const { id, title, amount, category, dayOfMonth } = req.body;
-
-      if (!id || !title || amount === undefined || !category) {
-        return res.status(400).json({ error: 'Missing required recurring bill fields' });
-      }
-
-      const parsedAmount = parseFloat(amount);
-      if (isNaN(parsedAmount) || parsedAmount <= 0) {
-        return res.status(400).json({ error: 'المبلغ المدخل غير صالح' });
-      }
-
-      const existingBills = db.getRecurringBills(uid);
-      const existingBill = existingBills.find(b => b.id === id);
-      const newBill: RecurringBill = {
-        id,
-        uid,
-        title,
-        amount: parsedAmount,
-        category,
-        dayOfMonth: dayOfMonth || 1,
-        createdAt: existingBill ? existingBill.createdAt : Date.now()
-      };
-      db.saveRecurringBill(newBill);
+      const input = billInput(req.body);
+      const existingBill = db.getRecurringBills(uid).find(b => b.id === input.id);
+      db.saveRecurringBill({ ...input, uid, createdAt: existingBill?.createdAt ?? Date.now() });
 
       notifySyncClients(uid);
-      const saved = db.getRecurringBills(uid).find(b => b.id === id);
+      const saved = db.getRecurringBills(uid).find(b => b.id === input.id);
       res.status(200).json(saved);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -1003,13 +950,13 @@ async function startServer() {
       const uid = (req as any).authUser.uid;
       const { id } = req.params;
 
+      if (!db.getRecurringBills(uid).some(b => b.id === id)) throw new HttpError(404, 'السجل غير متاح');
       db.deleteRecurringBill(id, uid);
       notifySyncClients(uid);
       res.status(200).json({ success: true });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -1026,8 +973,7 @@ async function startServer() {
       res.status(200).json(config);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -1035,56 +981,14 @@ async function startServer() {
   app.post('/api/settings', requireAuth, async (req, res) => {
     try {
       const uid = (req as any).authUser.uid;
-      const {
-        currency,
-        cycleStart,
-        sortOrder,
-        defaultFilter,
-        defaultCategory,
-        defaultSource,
-        showMotivation,
-        showCharts,
-        autoHome,
-        confirmDelete,
-        realTimeSync,
-        enableSounds,
-        language,
-        useHijri
-      } = req.body;
-
-      const dbShowMotivation = showMotivation ? 1 : 0;
-      const dbShowCharts = showCharts ? 1 : 0;
-      const dbAutoHome = autoHome ? 1 : 0;
-      const dbConfirmDelete = confirmDelete ? 1 : 0;
-      const dbRealTimeSync = realTimeSync !== undefined ? (realTimeSync ? 1 : 0) : 1;
-      const dbEnableSounds = enableSounds !== undefined ? (enableSounds ? 1 : 0) : 1;
-      const dbUseHijri = useHijri !== undefined ? (useHijri ? 1 : 0) : 1;
-
-      const newSettings: Setting = {
-        uid,
-        currency: currency || 'ر.س',
-        cycleStart: parseInt(cycleStart) || 1,
-        sortOrder: sortOrder || 'desc',
-        defaultFilter: defaultFilter || 'all',
-        defaultCategory: defaultCategory || 'طعام وشراب',
-        defaultSource: defaultSource || 'راتب',
-        showMotivation: dbShowMotivation,
-        showCharts: dbShowCharts,
-        autoHome: dbAutoHome,
-        confirmDelete: dbConfirmDelete,
-        realTimeSync: dbRealTimeSync,
-        enableSounds: dbEnableSounds,
-        language: language || 'ar',
-        useHijri: dbUseHijri
-      };
+      const newSettings = settingsInput(req.body, uid);
 
       db.saveSettings(newSettings);
       notifySyncClients(uid);
       res.status(200).json(newSettings);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -1101,7 +1005,8 @@ async function startServer() {
         databaseType: 'SQLite',
         user: sanitizeUser(user),
         settings: conf || {},
-        transactions: txs || []
+        transactions: txs || [],
+        recurring_bills: db.getRecurringBills(uid)
       };
 
       res.setHeader('Content-Type', 'application/json');
@@ -1109,8 +1014,7 @@ async function startServer() {
       res.status(200).json(bundle);
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
@@ -1118,114 +1022,44 @@ async function startServer() {
   app.post('/api/import', requireAuth, async (req, res) => {
     try {
       const uid = (req as any).authUser.uid;
-      const { settings, transactions: importedTxs } = req.body;
-
-      // Restore settings
-      if (settings) {
-        const newSettings: Setting = {
-          uid,
-          currency: settings.currency || 'ر.س',
-          cycleStart: settings.cycleStart || 1,
-          sortOrder: settings.sortOrder || 'desc',
-          defaultFilter: settings.defaultFilter || 'all',
-          defaultCategory: settings.defaultCategory || 'طعام وشراب',
-          defaultSource: settings.defaultSource || 'راتب',
-          showMotivation: settings.showMotivation !== undefined ? (settings.showMotivation ? 1 : 0) : 1,
-          showCharts: settings.showCharts !== undefined ? (settings.showCharts ? 1 : 0) : 1,
-          autoHome: settings.autoHome !== undefined ? (settings.autoHome ? 1 : 0) : 1,
-          confirmDelete: settings.confirmDelete !== undefined ? (settings.confirmDelete ? 1 : 0) : 1,
-          realTimeSync: settings.realTimeSync !== undefined ? (settings.realTimeSync ? 1 : 0) : 1,
-          enableSounds: settings.enableSounds !== undefined ? (settings.enableSounds ? 1 : 0) : 1,
-          language: settings.language || 'ar',
-          useHijri: settings.useHijri !== undefined ? (settings.useHijri ? 1 : 0) : 1
-        };
-        db.saveSettings(newSettings);
-      }
-
-      // Restore transactions
-      if (Array.isArray(importedTxs)) {
-        // Clear current ones first
-        db.deleteAllTransactionsForUser(uid);
-
-        for (const tx of importedTxs) {
-          const txId = tx.id || `${uid}_import_${Math.random().toString(36).substring(2, 11)}`;
-          db.saveTransaction({
-            id: txId,
-            uid,
-            type: tx.type || 'expense',
-            amount: parseFloat(tx.amount || 0),
-            source: tx.source || null,
-            category: tx.category || null,
-            date: tx.date || new Date().toISOString().split('T')[0],
-            note: tx.note || '',
-            createdAt: tx.createdAt || Date.now(),
-            userEmail: tx.userEmail || '',
-            userName: tx.userName || ''
-          });
-        }
-      }
-
-      res.status(200).json({ success: true, count: Array.isArray(importedTxs) ? importedTxs.length : 0 });
-    } catch (e: any) {
-      console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
-    }
-  });
-
-  // API - Admin Stats (RESTRICTED to requireAdmin)
-  app.get('/api/admin/stats', requireAdmin, async (req, res) => {
-    try {
-      res.status(200).json({
-        users: db.getAllUsers().map(sanitizeUser),
-        transactions: db.getAllTransactions()
+      const body = object(req.body);
+      const user = (req as any).authUser as User;
+      if (body.mode !== undefined && body.mode !== 'merge' && body.mode !== 'replace') throw new HttpError(400, 'وضع استيراد غير صالح');
+      const settings = body.settings === undefined ? undefined : settingsInput(body.settings, uid);
+      const validateRows = (rows: unknown) => {
+        if (!Array.isArray(rows) || rows.length > 10000) throw new HttpError(400, 'عدد السجلات أو نوعها غير صالح');
+        return rows;
+      };
+      const importedTxs: Transaction[] | undefined = body.transactions === undefined ? undefined : validateRows(body.transactions).map(row => {
+        const tx = object(row);
+        const input = transactionInput({ ...tx, id: tx.id ?? crypto.randomUUID() });
+        return { ...input, uid, createdAt: tx.createdAt === undefined ? Date.now() : integer(tx.createdAt, 0, Number.MAX_SAFE_INTEGER), userEmail: user.email, userName: user.name };
       });
+      const importedBills: RecurringBill[] | undefined = body.recurring_bills === undefined ? undefined : validateRows(body.recurring_bills).map(row => {
+        const bill = object(row);
+        const input = billInput({ ...bill, id: bill.id ?? crypto.randomUUID() });
+        return { ...input, uid, createdAt: bill.createdAt === undefined ? Date.now() : integer(bill.createdAt, 0, Number.MAX_SAFE_INTEGER) };
+      });
+      for (const rows of [importedTxs, importedBills]) {
+        if (rows && new Set(rows.map(row => row.id)).size !== rows.length) throw new HttpError(400, 'معرفات مكررة في ملف الاستيراد');
+      }
+      if (!settings && !importedTxs && !importedBills) throw new HttpError(400, 'ملف استيراد فارغ');
+      db.restoreUserBundle(uid, settings, importedTxs, importedBills, body.mode === 'replace');
+      notifySyncClients(uid);
+      res.json({ success: true, count: importedTxs?.length ?? 0, billCount: importedBills?.length ?? 0 });
     } catch (e: any) {
       console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
+      res.status(e instanceof HttpError ? e.status : 500).json({ error: e instanceof HttpError ? e.message : 'حدث خطأ داخلي في الخادم' });
     }
   });
 
-  // API - Admin Clear User
-  app.post('/api/admin/clear-user', requireAdmin, async (req, res) => {
-    try {
-      const { targetUid } = req.body;
-      if (!targetUid) {
-        return res.status(400).json({ error: 'Target user ID is required' });
-      }
-
-      db.deleteAllTransactionsForUser(targetUid);
-      notifySyncClients(targetUid);
-      res.status(200).json({ success: true });
-    } catch (e: any) {
-      console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
-    }
+  // Platform operations receive counts only; family roles will be separate.
+  app.get('/api/admin/stats', requireAdmin, (_req, res) => res.json(db.getAggregateStats()));
+  app.post(['/api/admin/clear-user', '/api/admin/delete-txn'], requireAdmin, (_req, res) => {
+    res.status(410).json({ error: 'إدارة المنصة لا تملك صلاحية حذف المعاملات الشخصية' });
   });
 
-  // API - Admin Delete Single Txn
-  app.post('/api/admin/delete-txn', requireAdmin, async (req, res) => {
-    try {
-      const { txnId } = req.body;
-      if (!txnId) {
-        return res.status(400).json({ error: 'Transaction ID is required' });
-      }
-
-      const txnObj = db.getTransactionById(txnId);
-      const targetUid = txnObj ? txnObj.uid : '';
-      db.deleteTransactionAdmin(txnId);
-      if (targetUid) {
-        notifySyncClients(targetUid);
-      }
-      res.status(200).json({ success: true });
-    } catch (e: any) {
-      console.error(e);
-      const isProd = process.env.NODE_ENV === 'production';
-      res.status(500).json({ error: isProd ? 'حدث خطأ داخلي في الخادم' : e.message });
-    }
-  });
+  app.use('/api', (_req, res) => res.status(404).json({ error: 'المسار غير موجود' }));
 
   // Integration with Vite inside development mode
   const isProd = process.env.NODE_ENV === 'production';
@@ -1245,12 +1079,14 @@ async function startServer() {
     });
   }
 
-  const port = 3000;
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Server listening at http://0.0.0.0:${port}`);
+  const port = Number(process.env.PORT ?? 3000);
+  const server = app.listen(port, '0.0.0.0', () => {
+    const address = server.address();
+    console.log(`Server listening at http://0.0.0.0:${typeof address === 'object' && address ? address.port : port}`);
   });
 }
 
 startServer().catch(err => {
   console.error('Fatal error during server startup:', err);
+  process.exitCode = 1;
 });
