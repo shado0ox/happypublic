@@ -6,3 +6,18 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Exclude runtime data and secrets
+/node_modules/
+/dist/
+/data/
+/backups/
+/.env
+/.env.*
+!/.env.example
+*.db
+*.db-wal
+*.db-shm
+/albait.json
+/albait.json.*
+/albait_edit.json

@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Trash2 } from 'lucide-react';
+import { getHijriDateString } from '../translations';
 
 interface Transaction {
   id: string;
@@ -23,6 +24,8 @@ interface SwipeableTransactionItemProps {
   descText: string;
   currency: string;
   onDelete: (id: string) => any;
+  language?: string;
+  useHijri?: boolean;
 }
 
 export default function SwipeableTransactionItem({
@@ -31,7 +34,9 @@ export default function SwipeableTransactionItem({
   emoji,
   descText,
   currency,
-  onDelete
+  onDelete,
+  language = 'ar',
+  useHijri = true
 }: SwipeableTransactionItemProps) {
   const [dragOffset, setDragOffset] = useState(0);
   const [isSwiping, setIsSwiping] = useState(false);
@@ -104,6 +109,9 @@ export default function SwipeableTransactionItem({
     }, 250);
   };
 
+  const isRTL = language === 'ar';
+  const currentLocale = isRTL ? 'ar-SA' : 'en-US';
+
   return (
     <div className={`relative overflow-hidden rounded-xl transition-all duration-300 ${
       isDeleting ? 'max-h-0 opacity-0 mb-0 pointer-events-none scale-95' : 'max-h-[100px] mb-2'
@@ -116,7 +124,7 @@ export default function SwipeableTransactionItem({
         }}
       >
         <div className="flex items-center gap-1.5 font-bold text-xs">
-          <span>اسحب أكثر للحذف السريع</span>
+          <span>{isRTL ? 'اسحب أكثر للحذف السريع' : 'Swipe more to delete'}</span>
           <Trash2 className="w-4.5 h-4.5 animate-pulse" />
         </div>
       </div>
@@ -141,14 +149,14 @@ export default function SwipeableTransactionItem({
           <div className="pointer-events-none">
             <span className="text-xs font-black text-[#2c1f0e] block max-w-[180px] truncate">{descText}</span>
             <span className="text-[10px] text-[#7a6a52] block mt-0.5">
-              {tx.date} · {isInc ? (tx.source || 'دخل وارد') : (tx.category || 'مصروف')}
+              {tx.date}{useHijri ? ` ( ${getHijriDateString(tx.date)} )` : ''} · {isInc ? (tx.source || (isRTL ? 'دخل وارد' : 'Income')) : (tx.category || (isRTL ? 'مصروف' : 'Expense'))}
             </span>
           </div>
         </div>
 
         <div className="flex items-center gap-2 pointer-events-none select-none">
           <span className={`text-xs font-black shrink-0 ${isInc ? 'text-[#0a7c6b]' : 'text-amber-600'}`}>
-            {isInc ? '+' : '-'}{tx.amount.toLocaleString('ar-SA')} {currency}
+            {isInc ? '+' : '-'}{tx.amount.toLocaleString(currentLocale)} {currency}
           </span>
           
           {/* Guidance Indicator Chevron indicating swiping direction */}
