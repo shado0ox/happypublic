@@ -60,6 +60,7 @@ import {
 } from 'recharts';
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
 import FamilyWorkspace from './components/FamilyWorkspace';
+import { normalizeNumericInput } from './utils/numericInput';
 import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
 // @ts-ignore
 import logoImg from './assets/images/happy_home_logo_1781910968387.jpg';
@@ -180,7 +181,7 @@ export default function App() {
     return text;
   };
   const isRTL = settings.language === 'ar';
-  const currentLocale = settings.language === 'ar' ? 'ar-SA' : 'en-US';
+  const currentLocale = settings.language === 'ar' ? 'ar-SA-u-nu-latn' : 'en-US';
 
   // Splash & Install states
   const [logoType, setLogoType] = useState<'new' | 'classic'>(() => (localStorage.getItem('albait_logo_type') as 'new' | 'classic') || 'new');
@@ -694,7 +695,7 @@ export default function App() {
 
   const handleAddRecurringBill = async () => {
     if (!currentUser) return;
-    if (!recTitle.trim() || !recAmount) {
+    if (!recTitle.trim() || !Number.isFinite(Number(recAmount)) || Number(recAmount) <= 0) {
       triggerToast('⚠️ يرجى تعبئة اسم الفاتورة وتحديد المبلغ', true);
       return;
     }
@@ -702,7 +703,7 @@ export default function App() {
     const payload = {
       id: `rb_${Date.now()}`,
       title: recTitle,
-      amount: parseFloat(recAmount),
+      amount: Number(recAmount),
       category: recCategory,
       dayOfMonth: recDay
     };
@@ -1346,8 +1347,8 @@ export default function App() {
   };
 
   const handleSaveIncome = async () => {
-    const val = parseFloat(incomeAmount);
-    if (!val || val <= 0) {
+    const val = Number(incomeAmount);
+    if (!Number.isFinite(val) || val <= 0) {
       triggerToast('أدخل مبلغاً صحيحاً ⚠️', true);
       return;
     }
@@ -1419,8 +1420,8 @@ export default function App() {
   };
 
   const handleSaveExpense = async () => {
-    const val = parseFloat(expenseAmount);
-    if (!val || val <= 0) {
+    const val = Number(expenseAmount);
+    if (!Number.isFinite(val) || val <= 0) {
       triggerToast('أدخل مبلغاً صحيحاً ⚠️', true);
       return;
     }
@@ -2711,7 +2712,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
 
                         <div className="flex items-center gap-2">
                           <span className="font-black text-amber-800 text-[11px] shrink-0">
-                            {bill.amount.toLocaleString()} {settings.currency}
+                            {bill.amount.toLocaleString(currentLocale)} {settings.currency}
                           </span>
                           <button
                             onClick={() => handleQuickPayRecurringBill(bill)}
@@ -2834,11 +2835,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                 <label className="block text-xs font-bold mb-1.5 text-[#2c1f0e]">المبلغ الإجمالي (ريال سعودي أو حسب الإعدادات)</label>
                 <div className="relative">
                   <input
-                    type="number"
-                    pattern="[0-9]*"
+                    type="text"
+                    lang="en"
+                    dir="ltr"
+                    aria-label="المبلغ"
                     inputMode="decimal"
                     value={incomeAmount}
-                    onChange={e => setIncomeAmount(e.target.value)}
+                    onChange={e => setIncomeAmount(normalizeNumericInput(e.target.value))}
                     placeholder="0.00"
                     className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
                   />
@@ -2915,11 +2918,13 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                 <label className="block text-xs font-bold mb-1.5 text-[#2c1f0e]">قيمة المبلغ المدفوع</label>
                 <div className="relative">
                   <input
-                    type="number"
-                    pattern="[0-9]*"
+                    type="text"
+                    lang="en"
+                    dir="ltr"
+                    aria-label="المبلغ"
                     inputMode="decimal"
                     value={expenseAmount}
-                    onChange={e => setExpenseAmount(e.target.value)}
+                    onChange={e => setExpenseAmount(normalizeNumericInput(e.target.value))}
                     placeholder="0.00"
                     className="w-full text-right p-3 outline-none border-[1.5px] border-[#ddd0b8] focus:border-[#0a7c6b] rounded-lg text-sm bg-[#fffdf7] font-black"
                   />
@@ -3025,20 +3030,20 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
             <div className="grid grid-cols-4 gap-1.5">
               <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
                 <span className="text-[9px] text-[#7a6a52] font-black block">رصيد مرحل ↩️</span>
-                <span className="text-xs font-black text-slate-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString()} {settings.currency}</span>
+                <span className="text-xs font-black text-slate-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{previousMonthsBalance.toLocaleString(currentLocale)} {settings.currency}</span>
               </div>
               <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
                 <span className="text-[9px] text-[#7a6a52] font-black block">إجمالي الوارد 📈</span>
-                <span className="text-xs font-black text-[#0a7c6b] block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString()} {settings.currency}</span>
+                <span className="text-xs font-black text-[#0a7c6b] block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthIncome.toLocaleString(currentLocale)} {settings.currency}</span>
               </div>
               <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
                 <span className="text-[9px] text-[#7a6a52] font-black block">إجمالي المصروف 📉</span>
-                <span className="text-xs font-black text-amber-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString()} {settings.currency}</span>
+                <span className="text-xs font-black text-amber-600 block mt-1 whitespace-nowrap overflow-hidden text-ellipsis">{currentMonthExpense.toLocaleString(currentLocale)} {settings.currency}</span>
               </div>
               <div className="bg-white rounded-xl p-2 text-center border border-[#e8dcc8] shadow-xs">
                 <span className="text-[9px] text-[#7a6a52] font-black block">الرصيد المتاح 💰</span>
                 <span className={`text-xs font-black block mt-1 whitespace-nowrap overflow-hidden text-ellipsis ${currentMonthBalance >= 0 ? 'text-[#0a7c6b]' : 'text-red-500'}`}>
-                  {currentMonthBalance.toLocaleString()} {settings.currency}
+                  {currentMonthBalance.toLocaleString(currentLocale)} {settings.currency}
                 </span>
               </div>
             </div>
@@ -3083,7 +3088,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                         {pieChartData.map((entry, index) => (
                           <div key={index} className="flex items-center gap-1.5 text-[9.5px] font-bold text-[#7a6a52]">
                             <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: entry.color }} />
-                            <span>{entry.name}: {entry.value.toLocaleString()} {settings.currency}</span>
+                            <span>{entry.name}: {entry.value.toLocaleString(currentLocale)} {settings.currency}</span>
                           </div>
                         ))}
                       </div>
@@ -3250,11 +3255,11 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                   </div>
                 </div>
                 <input
-                  aria-label="بداية الدورة" type="number"
+                  aria-label="بداية الدورة" type="text" lang="en" dir="ltr" inputMode="numeric"
                   min={1}
                   max={28}
                   value={settings.cycleStart}
-                  onChange={e => handleUpdateSetting('cycleStart', Math.min(28, Math.max(1, parseInt(e.target.value) || 1)))}
+                  onChange={e => handleUpdateSetting('cycleStart', Math.min(28, Math.max(1, Number(normalizeNumericInput(e.target.value)) || 1)))}
                   className="w-16 p-1.5 bg-[#fdf3e0]/50 text-center border border-[#ddd0b8] rounded-lg text-xs font-bold text-[#2c1f0e]"
                 />
               </div>
@@ -3585,10 +3590,14 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-[#2c1f0e] block">المبلغ ({settings.currency})</label>
                         <input
-                          type="number"
+                          type="text"
+                          lang="en"
+                          dir="ltr"
+                          inputMode="decimal"
+                          aria-label="مبلغ الفاتورة"
                           placeholder="مثال: 350"
                           value={recAmount}
-                          onChange={e => setRecAmount(e.target.value)}
+                          onChange={e => setRecAmount(normalizeNumericInput(e.target.value))}
                           className="w-full p-2 bg-white border border-[#ddd0b8] rounded-lg text-xs font-semibold text-[#2c1f0e] placeholder-gray-400 focus:outline-[#0a7c6b]"
                         />
                       </div>
@@ -3596,12 +3605,16 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-[#2c1f0e] block">يوم الاستحقاق في الشهر</label>
                         <input
-                          type="number"
+                          type="text"
+                          lang="en"
+                          dir="ltr"
+                          inputMode="numeric"
+                          aria-label="يوم استحقاق الفاتورة"
                           min="1"
                           max="28"
                           placeholder="1"
                           value={recDay}
-                          onChange={e => setRecDay(Math.min(28, Math.max(1, parseInt(e.target.value) || 1)))}
+                          onChange={e => setRecDay(Math.min(28, Math.max(1, Number(normalizeNumericInput(e.target.value)) || 1)))}
                           className="w-full p-2 bg-white border border-[#ddd0b8] rounded-lg text-xs font-semibold text-[#2c1f0e] focus:outline-[#0a7c6b]"
                         />
                       </div>
@@ -3650,7 +3663,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                           
                           <div className="flex items-center gap-2.5">
                             <span className="font-black text-[#2c1f0e] shrink-0 text-xs">
-                              {bill.amount.toLocaleString()} {settings.currency}
+                              {bill.amount.toLocaleString(currentLocale)} {settings.currency}
                             </span>
                             <button
                               type="button"

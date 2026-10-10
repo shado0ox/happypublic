@@ -101,6 +101,7 @@ try {
   });
   assert.equal(personal.status, 200);
   const p = await open(owner);
+  console.log("settings opened");
   p.on("dialog", (d) => d.accept());
   assert.equal(await p.locator(".compact-settings details[open]").count(), 0);
   assert.equal(
@@ -111,7 +112,7 @@ try {
   );
   await p.screenshot({
     path: path.join(dir, "settings-mobile.png"),
-    fullPage: true,
+    fullPage: true, timeout: 10000,
   });
   const width = await p.evaluate(() => ({
     viewport: innerWidth,
@@ -216,8 +217,32 @@ try {
   await p.setViewportSize({ width: 1280, height: 900 });
   await p.screenshot({
     path: path.join(dir, "settings-desktop.png"),
-    fullPage: true,
+    fullPage: true, timeout: 10000,
   });
+  console.log("settings checks completed");
+  // Arabic and Persian keyboard digits survive input and save as exact ASCII amounts.
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  const expenseInput = p.getByRole('textbox', {name:'المبلغ', exact:true});
+  await expenseInput.fill('٣٥٫٧٥');
+  assert.equal(await expenseInput.inputValue(), '35.75');
+  assert.equal(await expenseInput.getAttribute('inputmode'), 'decimal');
+  assert.equal(await expenseInput.getAttribute('lang'), 'en');
+  const savedExpense = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/حفظ.*المصروف/}).click();
+  const expenseResponse = await savedExpense;
+  console.log("expense saved");
+  assert.equal(expenseResponse.status(), 200);
+  const readTransactions = async () => (await fetch(base + "/api/transactions", {headers:{"x-user-uid":owner.user.uid,"x-auth-token":owner.token}})).json();
+  assert.ok((await readTransactions()).some(tx => tx.type === "expense" && tx.amount === 35.75));
+  await p.getByRole('button', {name:'وارد', exact:true}).click();
+  const incomeInput = p.getByRole('textbox', {name:'المبلغ', exact:true});
+  await incomeInput.fill('۱۲۵٫۵۰');
+  assert.equal(await incomeInput.inputValue(), '125.50');
+  const savedIncome = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/حفظ.*الوارد|حفظ.*الإيراد/}).click();
+  const incomeResponse = await savedIncome;
+  assert.equal(incomeResponse.status(), 200);
+  assert.ok((await readTransactions()).some(tx => tx.type === "income" && tx.amount === 125.5));
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
@@ -233,16 +258,21 @@ try {
         "bill disclosure opens and closes",
         "failed delete preserves visible transactions",
         "desktop layout",
+        "Arabic expense digits save as ASCII",
+        "Persian income digits save as ASCII",
         "no React errors",
       ],
     }),
   );
+} catch (error) {
+  console.error(error);
+  throw error;
 } finally {
   await browser?.close();
   if (server?.exitCode === null) {
     const done = once(server, "exit");
     server.kill("SIGTERM");
-    await done;
+    await Promise.race([done, new Promise(resolve => setTimeout(() => { server.kill("SIGKILL"); resolve(); }, 2000))]);
   }
   await rm(dir, { recursive: true, force: true });
 }
