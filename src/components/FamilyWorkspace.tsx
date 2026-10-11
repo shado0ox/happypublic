@@ -1,3 +1,4 @@
+import { normalizeNumericInput } from '../utils/numericInput';
 import React, { useEffect, useRef, useState } from "react";
 import {
   Users,
@@ -243,7 +244,7 @@ export default function FamilyWorkspace({
   const canEdit = (creator: string) =>
     manager || (data?.role === "editor" && creator === uid);
   const amount = (value: number) =>
-    `${value.toLocaleString(isRTL ? "ar-SA" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${data?.currency || ""}`;
+    `${value.toLocaleString(isRTL ? "ar-SA-u-nu-latn" : "en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${data?.currency || ""}`;
   const monthStart = (() => {
     const [y, m] = month.split("-").map(Number),
       day = Math.min(data?.cycleStart || 1, new Date(y, m, 0).getDate());
@@ -503,13 +504,14 @@ export default function FamilyWorkspace({
                 <Field label={tr("المبلغ", "Amount")}>
                   <input
                     required
-                    type="number"
-                    min="0.01"
-                    max="1000000000"
-                    step="0.01"
+                    type="text"
+                    lang="en"
+                    dir="ltr"
+                    inputMode="decimal"
+                    pattern="[0-9]+([.][0-9]{1,2})?"
                     value={entry.amount}
                     onChange={(e) =>
-                      setEntry({ ...entry, amount: e.target.value })
+                      setEntry({ ...entry, amount: normalizeNumericInput(e.target.value) })
                     }
                   />
                 </Field>
@@ -674,25 +676,30 @@ export default function FamilyWorkspace({
                   <Field label={tr("المبلغ", "Amount")}>
                     <input
                       required
-                      type="number"
-                      min="0.01"
-                      max="1000000000"
-                      step="0.01"
+                      type="text"
+                      lang="en"
+                      dir="ltr"
+                      inputMode="decimal"
+                      pattern="[0-9]+([.][0-9]{1,2})?"
                       value={bill.amount}
                       onChange={(e) =>
-                        setBill({ ...bill, amount: e.target.value })
+                        setBill({ ...bill, amount: normalizeNumericInput(e.target.value) })
                       }
                     />
                   </Field>
                   <Field label={tr("يوم الاستحقاق", "Due day")}>
                     <input
                       required
-                      type="number"
+                      type="text"
+                      lang="en"
+                      dir="ltr"
+                      inputMode="numeric"
+                      pattern="[0-9]{1,2}"
                       min={1}
                       max={31}
                       value={bill.dayOfMonth}
                       onChange={(e) =>
-                        setBill({ ...bill, dayOfMonth: Number(e.target.value) })
+                        setBill({ ...bill, dayOfMonth: Number(normalizeNumericInput(e.target.value)) })
                       }
                     />
                   </Field>
@@ -1053,7 +1060,12 @@ export default function FamilyWorkspace({
                   <input
                     name="cycleStart"
                     required
-                    type="number"
+                    type="text"
+                    lang="en"
+                    dir="ltr"
+                    inputMode="numeric"
+                    pattern="[0-9]{1,2}"
+                    onInput={e => { e.currentTarget.value = normalizeNumericInput(e.currentTarget.value); }}
                     min={1}
                     max={31}
                     defaultValue={data.cycleStart}
@@ -1156,7 +1168,7 @@ export default function FamilyWorkspace({
                   </span>
                   <time>
                     {new Date(a.createdAt).toLocaleString(
-                      isRTL ? "ar-SA" : "en-US",
+                      isRTL ? "ar-SA-u-nu-latn" : "en-US",
                       { calendar: "gregory" },
                     )}
                   </time>

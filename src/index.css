@@ -109,3 +109,30 @@ body { margin: 0; background: var(--home-paper); }
 .family-invite { background: #eef5f1; padding: .8rem; border-radius: 8px; }
 .family-invite code { display: block; overflow-wrap: anywhere; user-select: all; margin-block: .8rem; }
 @media (max-width: 380px) { .family-fields { grid-template-columns: 1fr; } }
+
+.settings-title h2 { font-size: 22px; font-weight: 800; color: var(--home-ink); }
+.settings-title p { font-size: 13px; color: var(--home-muted); line-height: 1.8; margin-top: .3rem; }
+.settings-basics, .settings-section { padding: 1rem; background: white; border: 1px solid var(--home-line); border-radius: 12px; }
+.settings-basics h3 { font-size: 16px; font-weight: 800; }
+.settings-section summary { cursor: pointer; font-size: 15px; font-weight: 700; color: var(--home-ink); min-height: 44px; }
+.settings-section summary span { display: block; font-size: 12px; font-weight: 400; color: var(--home-muted); padding-inline-start: 1rem; margin-top: .25rem; }
+.settings-section[open] summary { margin-bottom: .8rem; padding-bottom: .8rem; border-bottom: 1px solid var(--home-line); }
+.compact-settings .text-xs { font-size: 14px; }
+.compact-settings .text-\[10px\] { font-size: 12px; }
+.compact-settings .text-\[9px\] { font-size: 12px; }
+.compact-settings select, .compact-settings input { min-height: 44px; max-width: 100%; }
+.compact-settings button { min-height: 44px; }
+.compact-settings button[role="switch"] { position: relative; min-height: 44px; height: 44px; padding-inline: 2px; flex-shrink: 0; background: transparent; }
+.compact-settings button[role="switch"]::before { content: ""; position: absolute; inset: 9px 0; border-radius: 999px; background: #c3cec8; }
+.compact-settings button[role="switch"][aria-checked="true"]::before { background: var(--home-green); }
+.compact-settings button[role="switch"] > div { position: relative; }
+.compact-settings fieldset { border: 0; padding: 0; }
+.compact-settings fieldset:disabled { opacity: .7; }
+.settings-danger { border-color: #efc4c0; }
+.settings-danger summary { color: #a32018; }
+@media (max-width: 400px) {
+  .compact-settings .gap-4 { gap: .5rem; }
+  .compact-settings .select-setting { max-width: 145px; padding-inline: .4rem; }
+}
+
+.settings-basics > div:last-child { border-bottom: 0; padding-bottom: 0; }
