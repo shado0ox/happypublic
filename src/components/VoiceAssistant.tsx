@@ -3,157 +3,8 @@ import { Sparkles, Mic, MicOff, Check, X, AlertTriangle, Play, HelpCircle } from
 import { motion, AnimatePresence } from 'motion/react';
 import { CAT_EMOJIS } from '../translations';
 
-export interface VoiceParsedResult {
-  amount?: number;
-  categoryOrSource?: string; // e.g., "food" or "راتب"
-  note?: string;
-  type?: 'income' | 'expense';
-}
-
-const ARABIC_NUMERALS_MAP: Record<string, number> = {
-  "واحد": 1, "واحدة": 1, "اثنين": 2, "إثنين": 2, "ثلاثة": 3, "ثلاث": 3, "أربعة": 4, "أربع": 4,
-  "خمسة": 5, "خمس": 5, "ستة": 6, "ست": 6, "سبعة": 7, "سبع": 7, "ثمانية": 8, "ثمان": 8, "تسعة": 9, "تسع": 9,
-  "عشرة": 10, "عشر": 10, "أحد عشر": 11, "إثنا عشر": 12, "ثلاثة عشر": 13, "أربعة عشر": 14, "خمسة عشر": 15,
-  "ستة عشر": 16, "سبعة عشر": 17, "ثمانية عشر": 18, "تسعة عشر": 19, "عشرون": 20, "عشرين": 20,
-  "ثلاثون": 30, "ثلاثين": 30, "أربعون": 40, "أربعين": 40, "خمسون": 50, "خمسين": 50, "ستون": 60, "ستين": 60,
-  "سبعون": 70, "سبعين": 70, "ثمانون": 80, "ثمانين": 80, "تسعون": 90, "تسعين": 90, "مائة": 100, "ميه": 100, "مئة": 100,
-  "مائتان": 200, "مئتان": 200, "ميتين": 200, "ألف": 1000, "الف": 1000, "ألفين": 2000, "الفين": 2000
-};
-
-// Word-by-word number parser for Arabic if no digits are returned
-export function parseArabicWordsToNumber(text: string): number | null {
-  const words = text.split(/\s+/);
-  let total = 0;
-  let temp = 0;
-  for (const word of words) {
-    if (ARABIC_NUMERALS_MAP[word] !== undefined) {
-      const val = ARABIC_NUMERALS_MAP[word];
-      if (val === 100 || val === 1000) {
-        if (temp === 0) temp = 1;
-        total += temp * val;
-        temp = 0;
-      } else if (val === 200 || val === 2000) {
-        total += val;
-        temp = 0;
-      } else {
-        temp += val;
-      }
-    }
-  }
-  total += temp;
-  return total > 0 ? total : null;
-}
-
-export function extractDigits(text: string): number | null {
-  // Convert Eastern Arabic numerals (٠-٩) to Western (0-9)
-  const normalized = text.replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-  // Match any digits with optional decimal point
-  const match = normalized.match(/\d+(\.\d+)?/);
-  if (match) {
-    return parseFloat(match[0]);
-  }
-  return null;
-}
-
-const EXPENSE_KEYWORDS = [
-  { id: "food", name: "طعام وشراب", keys: ["طعام", "شراب", "أكل", "اكل", "شرب", "مطعم", "مطاعم", "سوبرماركت", "سوبر ماركت", "غداء", "عشاء", "فطور", "بقالة", "تموينات", "لحم", "خضار", "فواكه", "دجاج", "حلويات", "قهوة", "مقهى", "كافيه", "بندة", "العثيم", "grocery", "food", "eat", "restaurant", "cafe", "coffee", "dinner", "lunch", "breakfast"] },
-  { id: "transport", name: "مواصلات", keys: ["بنزين", "سيارة", "تاكسي", "مواصلات", "اوبر", "كريم", "سفر", "تذكرة", "باص", "مترو", "شحن", "تعبئة", "كفرات", "روغ", "car", "gas", "petrol", "taxi", "uber", "transport", "flight"] },
-  { id: "utilities", name: "كهرباء ومياه", keys: ["كهرباء", "مياه", "فاتورة", "نت", "انترنت", "اتصالات", "جوال", "هاتف", "غاز", "كهربا", "بيل", "اس تي سي", "stc", "موبايلي", "زين", "زين", "bill", "internet", "electricity", "water", "phone"] },
-  { id: "education", name: "تعليم", keys: ["دراسة", "مدرسة", "جامعة", "كتب", "دفاتر", "تعليم", "كورسات", "دورة", "قسط", "حقيبة", "رسوم", "روضة", "حضانه", "حضانة", "school", "education", "books", "university", "course", "fees"] },
-  { id: "health", name: "صحة وطب", keys: ["دواء", "علاج", "صيدلية", "دكتور", "طبيب", "مستشفى", "تحليل", "عيادة", "نظارة", "صحي", "أسنان", "اسنان", "عملية", "مرض", "فحص", "medical", "pharmacy", "doctor", "health", "medicine", "hospital"] },
-  { id: "clothing", name: "ملابس", keys: ["ملابس", "ثوب", "بدلة", "قميص", "فستان", "حذاء", "شوز", "ملبس", "كسوة", "جاكيت", "أحذية", "احذيه", "طرحه", "عبايه", "عباية", "جزمة", "clothes", "clothing", "dress", "shoes"] },
-  { id: "maintenance", name: "صيانة المنزل", keys: ["صيانة", "صيانه", "تصليح", "سباكة", "سباكه", "كهربائي", "ترميم", "منزل", "بيت", "مكيف", "ثلاجة", "ثلاجه", "غسالة", "غساله", "حديقة", "عفش", "أثاث", "اثاث", "تسريب", "maintenance", "repair", "plumbing"] },
-  { id: "entertainment", name: "ترفيه", keys: ["ترفيه", "العاب", "لعبة", "سينما", "فيلم", "نزهة", "نزهه", "رحلة", "رحلة", "ملاهي", "اشتراك", "نتفلكس", "شاهد", "شاشه", "سياحة", "شاليه", "مزرعة", "العاب", "play", "game", "cinema", "netflix", "entertainment", "fun"] },
-  { id: "other", name: "أخرى", keys: ["أخرى", "اخرى", "أشياء", "اشياء", "نثرية", "نثريه", "متنوعة", "متنوعه", "other", "misc"] }
-];
-
-const INCOME_KEYWORDS = [
-  { id: "راتب", name: "راتب شهري أساسي", keys: ["راتب", "معاش", "شهري", "سدادي", "العمل", "دوام", "الوظيفة", "الوظيفه", "salary", "job", "payroll"] },
-  { id: "مكافأة", name: "مكافأة أو حوافز مالية", keys: ["مكافأة", "حافز", "بونص", "حوافز", "ارباح اضافية", "أرباح إضافية", "زيادة", "زياده", "مكافأه", "bonus", "reward", "incentive"] },
-  { id: "إيجار", name: "عائد إيجار عقار أو أصل", keys: ["إيجار", "ايجار", "عقار", "شقة", "شقه", "محل", "فندق", "دكان", "rent", "property", "tenant"] },
-  { id: "استثمار", name: "أرباح أسهم أو استثمارات", keys: ["استثمار", "أسهم", "اسهم", "تداول", "أرباح", "ارباح", "تجارة", "بيعة", "بيعه", "سهم", "سندات", "محفظة", "crypto", "investment", "dividend", "shares", "stock"] },
-  { id: "هدية", name: "هدية أو وارد عائلي طارئ", keys: ["هدية", "هديه", "هبة", "عيدية", "عيديه", "تبرع", "مساعدة", "مسعده", "صدقة", "صدقه", "gift", "donation", "present", "eidiya"] },
-  { id: "أخرى", name: "وارد مالي آخر", keys: ["أخرى", "اخرى", "دبرة", "دبره", "شغل جانبي", "عمل حر", "مستقل", "freelance", "other"] }
-];
-
-export function cleanDescription(text: string, amount: number | null, matchedKeys: string[]): string {
-  let cleaned = text;
-
-  if (amount !== null) {
-    cleaned = cleaned.replace(new RegExp(String(amount), 'g'), '');
-    cleaned = cleaned.replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
-    cleaned = cleaned.replace(new RegExp(String(amount), 'g'), '');
-    
-    const arabicWords = ["ريال", "ريالاً", "ريال سعودي", "دولار", "جنيه", "درهم", "دينار", "ريالات", "قرش", "هللة", "sar", "usd", "egp", "aed"];
-    arabicWords.forEach(w => {
-      cleaned = cleaned.replace(new RegExp(w, 'gi'), '');
-    });
-  }
-
-  const filterWords = [
-    "صرفت", "دفعت", "سجلت", "سجل", "أضف", "اضف", "أدخل", "ادخل", "قيمة", "بقيمة", "بمبلغ", "مبلغ", "تم دفع", "تم صرف",
-    "وارد", "إيراد", "ايراد", "دخل", "جاني", "حصلت على", "جاءني", "على", "من", "في", "إلى", "الى", "لـ", "عن طريق",
-    "spent", "paid", "add", "record", "income", "expense", "amount", "of", "for", "on", "from"
-  ];
-
-  matchedKeys.forEach(k => {
-    cleaned = cleaned.replace(new RegExp(k, 'gi'), '');
-  });
-
-  filterWords.forEach(w => {
-    cleaned = cleaned.replace(new RegExp(`\\b${w}\\b`, 'gi'), '');
-    cleaned = cleaned.replace(new RegExp(`\\s${w}\\s`, 'g'), ' ');
-    cleaned = cleaned.replace(new RegExp(`^${w}\\s`, 'g'), '');
-    cleaned = cleaned.replace(new RegExp(`\\s${w}$`, 'g'), '');
-  });
-
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-  return cleaned;
-}
-
-export function parseVoiceCommand(text: string, mode: 'income' | 'expense'): VoiceParsedResult {
-  const normalized = text.toLowerCase().trim();
-  const amount = extractDigits(normalized) || parseArabicWordsToNumber(normalized);
-
-  let categoryOrSource: string | undefined = undefined;
-  let matchedKeys: string[] = [];
-
-  if (mode === 'expense') {
-    for (const cat of EXPENSE_KEYWORDS) {
-      const match = cat.keys.find(k => normalized.includes(k));
-      if (match) {
-        categoryOrSource = cat.id;
-        matchedKeys.push(match);
-        break;
-      }
-    }
-    if (!categoryOrSource && amount) {
-      categoryOrSource = "other";
-    }
-  } else {
-    for (const src of INCOME_KEYWORDS) {
-      const match = src.keys.find(k => normalized.includes(k));
-      if (match) {
-        categoryOrSource = src.id;
-        matchedKeys.push(match);
-        break;
-      }
-    }
-    if (!categoryOrSource && amount) {
-      categoryOrSource = "أخرى";
-    }
-  }
-
-  const note = cleanDescription(text, amount, matchedKeys);
-
-  return {
-    amount: amount || undefined,
-    categoryOrSource,
-    note: note || undefined,
-    type: mode
-  };
-}
-
+import { VoiceParsedResult, parseVoiceCommand, EXPENSE_KEYWORDS, INCOME_KEYWORDS } from '../utils/voiceCommand';
+export type { VoiceParsedResult } from '../utils/voiceCommand';
 interface VoiceAssistantProps {
   mode: 'income' | 'expense';
   currency: string;
@@ -167,30 +18,40 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
   const [result, setResult] = useState<VoiceParsedResult | null>(null);
   const [browserSupported, setBrowserSupported] = useState(true);
   const [permissionError, setPermissionError] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
+  const [typedCommand, setTypedCommand] = useState('');
+  const toastRef = useRef(triggerToast);
+  toastRef.current = triggerToast;
+  const busyRef = useRef(false);
   
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    if (!SpeechRecognition || !window.isSecureContext) {
       setBrowserSupported(false);
       return;
     }
 
+    setBrowserSupported(true);
+    let disposed = false;
     const rec = new SpeechRecognition();
     rec.continuous = false;
     rec.interimResults = false;
     rec.lang = 'ar-SA'; // Default to Saudi Arabic speech recognition
 
     rec.onstart = () => {
+      if (disposed) return;
       setIsListening(true);
+      setVoiceError('');
       setPermissionError(false);
       setTranscript('جاري الاستماع... تحدّث الآن 🎙️');
       setResult(null);
     };
 
     rec.onresult = (event: any) => {
-      const text = event.results[0][0].transcript;
+      if (disposed) return;
+      const text = Array.from(event.results as any[]).map((item: any) => item[0]?.transcript || '').join(' ');
       setTranscript(text);
       
       const parsed = parseVoiceCommand(text, mode);
@@ -198,63 +59,47 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
     };
 
     rec.onerror = (event: any) => {
-      console.error('Speech recognition error', event);
+      if (disposed) return;
+      busyRef.current = false;
       setIsListening(false);
-      if (event.error === 'not-allowed') {
-        setPermissionError(true);
-        triggerToast('⚠️ يرجى تفعيل صلاحية الميكروفون للتعرف الصوتي', true);
-      } else {
-        triggerToast('❌ لم نتمكن من فهم الصوت، يرجى المحاولة مجدداً', true);
-      }
+      if (event.error === 'aborted') return;
+      const denied = event.error === 'not-allowed' || event.error === 'service-not-allowed';
+      setPermissionError(denied);
+      const message = denied ? 'اسمح بالميكروفون من إعدادات الموقع، أو استخدم ميكروفون لوحة المفاتيح في الخانة أدناه.'
+        : event.error === 'network' ? 'تعذر الاتصال بخدمة التعرف الصوتي. تحقق من الإنترنت أو استخدم ميكروفون لوحة المفاتيح.'
+        : event.error === 'audio-capture' ? 'لم يتوفر ميكروفون. تحقق من توصيله وصلاحياته.'
+        : event.error === 'no-speech' ? 'لم أسمع كلامًا. حاول مجددًا وتحدث بعد بدء الاستماع.'
+        : 'تعذر تشغيل التعرف الصوتي في هذا المتصفح. استخدم خانة الإملاء أدناه.';
+      setVoiceError(message);
+      setTranscript('');
+      toastRef.current(message, true);
     };
-
     rec.onend = () => {
-      setIsListening(false);
+      busyRef.current = false;
+      if (!disposed) setIsListening(false);
     };
-
     recognitionRef.current = rec;
-  }, [mode, triggerToast]);
+    return () => {
+      disposed = true;
+      rec.onstart = rec.onresult = rec.onerror = rec.onend = null;
+      rec.abort();
+      if (recognitionRef.current === rec) recognitionRef.current = null;
+      busyRef.current = false;
+    };
+  }, [mode]);
 
   const toggleListening = () => {
-    if (!browserSupported) {
-      triggerToast('⚠️ التعرف الصوتي غير مدعوم في متصفحك الحالي، يرجى تجربة متصفح كروم أو سفاري', true);
-      return;
-    }
-
-    if (isListening) {
-      recognitionRef.current?.stop();
-    } else {
-      try {
-        recognitionRef.current?.start();
-      } catch (e) {
-        console.error(e);
-        // Force recreation of speech instance if state got locked
-        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        if (SpeechRecognition) {
-          const freshRec = new SpeechRecognition();
-          freshRec.continuous = false;
-          freshRec.interimResults = false;
-          freshRec.lang = 'ar-SA';
-          freshRec.onstart = () => {
-            setIsListening(true);
-            setTranscript('جاري الاستماع... تحدّث الآن 🎙️');
-            setResult(null);
-          };
-          freshRec.onresult = (event: any) => {
-            const text = event.results[0][0].transcript;
-            setTranscript(text);
-            const parsed = parseVoiceCommand(text, mode);
-            setResult(parsed);
-          };
-          freshRec.onerror = (event: any) => {
-            setIsListening(false);
-            if (event.error === 'not-allowed') setPermissionError(true);
-          };
-          freshRec.onend = () => setIsListening(false);
-          recognitionRef.current = freshRec;
-          freshRec.start();
-        }
-      }
+    if (!recognitionRef.current) return;
+    if (busyRef.current) { recognitionRef.current.stop(); return; }
+    try {
+      busyRef.current = true;
+      setPermissionError(false);
+      setVoiceError('');
+      recognitionRef.current.start();
+    } catch {
+      busyRef.current = false;
+      setIsListening(false);
+      setVoiceError('تعذر بدء التسجيل. أعد المحاولة أو استخدم ميكروفون لوحة المفاتيح.');
     }
   };
 
@@ -294,15 +139,16 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
         </div>
         <div className="text-[9.5px] text-[#7a6a52] font-semibold flex items-center gap-1">
           <HelpCircle className="w-3 h-3" />
-          بدون ذكاء اصطناعي (أوفلاين)
+          التعرف حسب دعم المتصفح والإنترنت
         </div>
       </div>
 
+      {voiceError && <p role="alert" className="text-xs text-red-700">{voiceError}</p>}
       {!browserSupported ? (
         <div className="text-right text-[10px] text-amber-800 bg-amber-50 border border-amber-200/50 p-2.5 rounded-lg flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
-            التعرف الصوتي غير مدعوم في متصفحك أو يحتاج إلى تشغيل التطبيق في تبويب مستقل (خارج نافذة المعاينة المدمجة). جرّب متصفح <strong>جوجل كروم</strong> أو <strong>سفاري</strong>.
+            التعرف الصوتي غير متاح هنا. افتح رابط HTTPS في متصفح يدعم التعرف، أو استخدم ميكروفون لوحة المفاتيح في الخانة أدناه.
           </div>
         </div>
       ) : (
@@ -310,6 +156,7 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
           <div className="flex items-center gap-3">
             <button
               type="button"
+              aria-label={isListening ? 'إيقاف الاستماع' : 'بدء الإدخال الصوتي'}
               onClick={toggleListening}
               className={`p-3.5 rounded-full transition-all shrink-0 shadow-sm relative ${
                 isListening ? 'animate-pulse text-white' : 'text-white'
@@ -357,6 +204,34 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
             </div>
           )}
 
+          <div className="text-[9px] text-[#7a6a52] bg-white/40 border border-[#e8dcc8]/40 p-2 rounded-lg text-right space-y-1">
+            <p className="font-bold text-[#2c1f0e]">💡 أمثلة يمكنك تجربتها:</p>
+            {mode === 'income' ? (
+              <ul className="list-disc pr-3.5 space-y-0.5">
+                <li>"راتب شهري أساسي بقيمة ٥٠٠٠ ريال لشهر يوليو"</li>
+                <li>"جاني هدية خمسين ريال من الوالد"</li>
+                <li>"مكافأة بمبلغ ميتين وخمسين ريال من الشغل"</li>
+              </ul>
+            ) : (
+              <ul className="list-disc pr-3.5 space-y-0.5">
+                <li>"صرفت مية وعشرين ريال فاتورة مياه"</li>
+                <li>"دفعت ستين ريال على طعام الغداء"</li>
+                <li>"بنزين سيارة بمبلغ خمسين ريال"</li>
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+      <details className="border-t border-[#e8dcc8] pt-2">
+        <summary className="cursor-pointer text-xs font-bold py-2">الإملاء من لوحة المفاتيح أو كتابة الجملة</summary>
+        <label htmlFor={`voice-command-${mode}`} className="block text-xs mb-2">اضغط الخانة ثم ميكروفون لوحة مفاتيح الهاتف، وقل المبلغ والتصنيف.</label>
+        <textarea id={`voice-command-${mode}`} rows={2} value={typedCommand} onChange={e => setTypedCommand(e.target.value)} className="w-full p-3 border rounded-lg bg-white text-sm" placeholder="صرفت 25.50 ريال على بنزين" />
+        <button type="button" disabled={!typedCommand.trim()} onClick={() => {
+          recognitionRef.current?.abort();
+          const parsed = parseVoiceCommand(typedCommand, mode);
+          setTranscript(typedCommand); setResult(parsed);
+        }} className="mt-2 rounded-lg bg-[#0a7c6b] text-white px-4 py-2 text-xs disabled:opacity-50">تحليل الجملة</button>
+      </details>
           <AnimatePresence>
             {result && (
               <motion.div
@@ -411,24 +286,7 @@ export default function VoiceAssistant({ mode, currency, onApply, triggerToast }
             )}
           </AnimatePresence>
 
-          <div className="text-[9px] text-[#7a6a52] bg-white/40 border border-[#e8dcc8]/40 p-2 rounded-lg text-right space-y-1">
-            <p className="font-bold text-[#2c1f0e]">💡 أمثلة يمكنك تجربتها:</p>
-            {mode === 'income' ? (
-              <ul className="list-disc pr-3.5 space-y-0.5">
-                <li>"راتب شهري أساسي بقيمة ٥٠٠٠ ريال لشهر يوليو"</li>
-                <li>"جاني هدية خمسين ريال من الوالد"</li>
-                <li>"مكافأة بمبلغ ميتين وخمسين ريال من الشغل"</li>
-              </ul>
-            ) : (
-              <ul className="list-disc pr-3.5 space-y-0.5">
-                <li>"صرفت مية وعشرين ريال فاتورة مياه"</li>
-                <li>"دفعت ستين ريال على طعام الغداء"</li>
-                <li>"بنزين سيارة بمبلغ خمسين ريال"</li>
-              </ul>
-            )}
-          </div>
-        </div>
-      )}
+      <p className="text-[10px] text-[#7a6a52]">قد يرسل المتصفح الصوت إلى خدمة التعرف الخاصة به. التطبيق لا يسجل الصوت أو يخزنه.</p>
     </div>
   );
 }

@@ -72,6 +72,16 @@ try {
       },
       { ...session.user, token: session.token },
     );
+    await c.addInitScript(() => {
+      window.__speechInstances = [];
+      class MockSpeechRecognition {
+        constructor() { window.__speechInstances.push(this); }
+        start() { this.onstart?.(); }
+        stop() { this.stopped = true; this.onend?.(); }
+        abort() { this.aborted = true; this.onend?.(); }
+      }
+      window.SpeechRecognition = MockSpeechRecognition;
+    });
     const p = await c.newPage();
     p.on("pageerror", (e) => errors.push(e.message));
     await p.goto(base);
@@ -243,6 +253,44 @@ try {
   const incomeResponse = await savedIncome;
   assert.equal(incomeResponse.status(), 200);
   assert.ok((await readTransactions()).some(tx => tx.type === "income" && tx.amount === 125.5));
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  await p.locator('summary').filter({hasText:'لصق رسالة البنك'}).click();
+  await p.getByLabel('الصق رسالة شراء واحدة، ثم اختر التصنيف واحفظ.').fill('شراء إنترنت ‬‪\nمبلغ ‬‪55.32 ‬‪SAR (‬‪55.32 SAR)\nبطاقة ‬‪مسبقة الدفع ***1963\nمن ‬‪OPENAI *CHATGPT SUBSCR\nالتاريخ ‬‪08/10/26 ‬‪15:59\nالرصيد المتبقي ‬‪0.00 ‬‪SAR');
+  assert.equal(await p.getByRole('textbox', {name:'المبلغ', exact:true}).inputValue(), '55.32');
+  assert.equal(await p.locator('input[type="date"]').inputValue(), '2026-10-08');
+  assert.equal(await p.getByPlaceholder('مثال: فاتورة المياه أو مشاوير الجمعية').inputValue(), 'OPENAI *CHATGPT SUBSCR');
+  assert.equal(await p.locator('#bank-message').inputValue(), '');
+  await p.getByRole('button', {name:/food/}).click();
+  const bankSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/حفظ.*المصروف/}).click();
+  assert.equal((await bankSaved).status(), 200);
+  const bankTx = (await readTransactions()).find(tx => tx.note === 'OPENAI *CHATGPT SUBSCR');
+  assert.equal(bankTx.amount, 55.32);
+  assert.equal(bankTx.date, '2026-10-08');
+  assert.equal(bankTx.category, 'food');
+  assert.ok(!JSON.stringify(bankTx).includes('1963'));
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  const instanceCount = await p.evaluate(() => window.__speechInstances.length);
+  await p.getByRole('button', {name:'بدء الإدخال الصوتي', exact:true}).click();
+  await p.getByRole('button', {name:'إيقاف الاستماع', exact:true}).waitFor();
+  assert.equal(await p.evaluate(() => window.__speechInstances.length), instanceCount);
+  await p.getByRole('button', {name:'إيقاف الاستماع', exact:true}).click();
+  assert.ok(await p.evaluate(() => window.__speechInstances.at(-1).stopped));
+  await p.getByRole('button', {name:'بدء الإدخال الصوتي', exact:true}).click();
+  await p.evaluate(() => window.__speechInstances.at(-1).onerror({error:'network'}));
+  await p.getByRole('alert').filter({hasText:'تعذر الاتصال بخدمة التعرف الصوتي'}).waitFor();
+  await p.getByRole('button', {name:'الرئيسية', exact:true}).click();
+  assert.ok(await p.evaluate(() => window.__speechInstances.at(-1).aborted));
+  await p.evaluate(() => { delete window.SpeechRecognition; delete window.webkitSpeechRecognition; });
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  await p.locator('summary').filter({hasText:'الإملاء من لوحة المفاتيح'}).click();
+  await p.locator('#voice-command-expense').fill('صرفت ٢٥٫٥٠ ريال بنزين');
+  await p.getByRole('button', {name:'تحليل الجملة',exact:true}).click();
+  await p.getByText('25.5 ر.س', {exact:false}).first().waitFor();
+  const voiceSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/تعبئة الحقول وحفظ المعاملة/}).click();
+  assert.equal((await voiceSaved).status(),200);
+  assert.ok((await readTransactions()).some(tx => tx.type === 'expense' && tx.amount === 25.5));
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
@@ -260,6 +308,9 @@ try {
         "desktop layout",
         "Arabic expense digits save as ASCII",
         "Persian income digits save as ASCII",
+        "bank message fills and saves purchase amount/date/merchant without card data",
+        "speech instance remains stable across renders and cleans up",
+        "network error and unsupported-browser dictation fallback",
         "no React errors",
       ],
     }),
