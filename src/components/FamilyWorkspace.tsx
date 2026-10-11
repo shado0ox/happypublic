@@ -1,3 +1,4 @@
+import BankMessageInput from './BankMessageInput';
 import { normalizeNumericInput } from '../utils/numericInput';
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -501,6 +502,7 @@ export default function FamilyWorkspace({
                     <option value="income">{tr("وارد", "Income")}</option>
                   </select>
                 </Field>
+                {entry.type === 'expense' && <BankMessageInput onApply={result => setEntry({ ...entry, amount: result.amount, note: result.merchant, date: result.date || entry.date })} />}
                 <Field label={tr("المبلغ", "Amount")}>
                   <input
                     required

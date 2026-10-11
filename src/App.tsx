@@ -60,6 +60,7 @@ import {
 } from 'recharts';
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
 import FamilyWorkspace from './components/FamilyWorkspace';
+import BankMessageInput from './components/BankMessageInput';
 import { normalizeNumericInput } from './utils/numericInput';
 import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
 // @ts-ignore
@@ -2905,6 +2906,12 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               <span className="text-xl">💸</span>
               تسجيل مصروف منزلي جديد
             </h2>
+
+            <BankMessageInput onApply={result => {
+              setExpenseAmount(result.amount);
+              setExpenseDesc(result.merchant);
+              if (result.date) setExpenseDate(result.date);
+            }} />
 
             <VoiceAssistant
               mode="expense"

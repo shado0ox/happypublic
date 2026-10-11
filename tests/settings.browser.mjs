@@ -243,6 +243,22 @@ try {
   const incomeResponse = await savedIncome;
   assert.equal(incomeResponse.status(), 200);
   assert.ok((await readTransactions()).some(tx => tx.type === "income" && tx.amount === 125.5));
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  await p.locator('summary').filter({hasText:'لصق رسالة البنك'}).click();
+  await p.getByLabel('الصق رسالة شراء واحدة، ثم اختر التصنيف واحفظ.').fill('شراء إنترنت ‬‪\nمبلغ ‬‪55.32 ‬‪SAR (‬‪55.32 SAR)\nبطاقة ‬‪مسبقة الدفع ***1963\nمن ‬‪OPENAI *CHATGPT SUBSCR\nالتاريخ ‬‪08/10/26 ‬‪15:59\nالرصيد المتبقي ‬‪0.00 ‬‪SAR');
+  assert.equal(await p.getByRole('textbox', {name:'المبلغ', exact:true}).inputValue(), '55.32');
+  assert.equal(await p.locator('input[type="date"]').inputValue(), '2026-10-08');
+  assert.equal(await p.getByPlaceholder('مثال: فاتورة المياه أو مشاوير الجمعية').inputValue(), 'OPENAI *CHATGPT SUBSCR');
+  assert.equal(await p.locator('#bank-message').inputValue(), '');
+  await p.getByRole('button', {name:'طعام', exact:true}).click();
+  const bankSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/حفظ.*المصروف/}).click();
+  assert.equal((await bankSaved).status(), 200);
+  const bankTx = (await readTransactions()).find(tx => tx.note === 'OPENAI *CHATGPT SUBSCR');
+  assert.equal(bankTx.amount, 55.32);
+  assert.equal(bankTx.date, '2026-10-08');
+  assert.equal(bankTx.category, 'طعام وشراب');
+  assert.ok(!JSON.stringify(bankTx).includes('1963'));
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
@@ -260,6 +276,7 @@ try {
         "desktop layout",
         "Arabic expense digits save as ASCII",
         "Persian income digits save as ASCII",
+        "bank message fills and saves purchase amount/date/merchant without card data",
         "no React errors",
       ],
     }),
