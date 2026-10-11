@@ -250,14 +250,14 @@ try {
   assert.equal(await p.locator('input[type="date"]').inputValue(), '2026-10-08');
   assert.equal(await p.getByPlaceholder('مثال: فاتورة المياه أو مشاوير الجمعية').inputValue(), 'OPENAI *CHATGPT SUBSCR');
   assert.equal(await p.locator('#bank-message').inputValue(), '');
-  await p.getByRole('button', {name:/طعام/}).click();
+  await p.getByRole('button', {name:/food/}).click();
   const bankSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
   await p.getByRole('button', {name:/حفظ.*المصروف/}).click();
   assert.equal((await bankSaved).status(), 200);
   const bankTx = (await readTransactions()).find(tx => tx.note === 'OPENAI *CHATGPT SUBSCR');
   assert.equal(bankTx.amount, 55.32);
   assert.equal(bankTx.date, '2026-10-08');
-  assert.equal(bankTx.category, 'طعام وشراب');
+  assert.equal(bankTx.category, 'food');
   assert.ok(!JSON.stringify(bankTx).includes('1963'));
   assert.deepEqual(errors, []);
   console.log(
