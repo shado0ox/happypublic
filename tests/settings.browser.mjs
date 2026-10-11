@@ -72,6 +72,16 @@ try {
       },
       { ...session.user, token: session.token },
     );
+    await c.addInitScript(() => {
+      window.__speechInstances = [];
+      class MockSpeechRecognition {
+        constructor() { window.__speechInstances.push(this); }
+        start() { this.onstart?.(); }
+        stop() { this.stopped = true; this.onend?.(); }
+        abort() { this.aborted = true; this.onend?.(); }
+      }
+      window.SpeechRecognition = MockSpeechRecognition;
+    });
     const p = await c.newPage();
     p.on("pageerror", (e) => errors.push(e.message));
     await p.goto(base);
@@ -259,6 +269,28 @@ try {
   assert.equal(bankTx.date, '2026-10-08');
   assert.equal(bankTx.category, 'food');
   assert.ok(!JSON.stringify(bankTx).includes('1963'));
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  const instanceCount = await p.evaluate(() => window.__speechInstances.length);
+  await p.getByRole('button', {name:'بدء الإدخال الصوتي', exact:true}).click();
+  await p.getByRole('button', {name:'إيقاف الاستماع', exact:true}).waitFor();
+  assert.equal(await p.evaluate(() => window.__speechInstances.length), instanceCount);
+  await p.getByRole('button', {name:'إيقاف الاستماع', exact:true}).click();
+  assert.ok(await p.evaluate(() => window.__speechInstances.at(-1).stopped));
+  await p.getByRole('button', {name:'بدء الإدخال الصوتي', exact:true}).click();
+  await p.evaluate(() => window.__speechInstances.at(-1).onerror({error:'network'}));
+  await p.getByRole('alert').filter({hasText:'تعذر الاتصال بخدمة التعرف الصوتي'}).waitFor();
+  await p.getByRole('button', {name:'الرئيسية', exact:true}).click();
+  assert.ok(await p.evaluate(() => window.__speechInstances.at(-1).aborted));
+  await p.evaluate(() => { delete window.SpeechRecognition; delete window.webkitSpeechRecognition; });
+  await p.getByRole('button', {name:'مصروف', exact:true}).click();
+  await p.locator('summary').filter({hasText:'الإملاء من لوحة المفاتيح'}).click();
+  await p.locator('#voice-command-expense').fill('صرفت ٢٥٫٥٠ ريال بنزين');
+  await p.getByRole('button', {name:'تحليل الجملة',exact:true}).click();
+  await p.getByText('25.5 ر.س', {exact:false}).first().waitFor();
+  const voiceSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
+  await p.getByRole('button', {name:/تعبئة الحقول وحفظ المعاملة/}).click();
+  assert.equal((await voiceSaved).status(),200);
+  assert.ok((await readTransactions()).some(tx => tx.type === 'expense' && tx.amount === 25.5));
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
@@ -277,6 +309,8 @@ try {
         "Arabic expense digits save as ASCII",
         "Persian income digits save as ASCII",
         "bank message fills and saves purchase amount/date/merchant without card data",
+        "speech instance remains stable across renders and cleans up",
+        "network error and unsupported-browser dictation fallback",
         "no React errors",
       ],
     }),
