@@ -250,7 +250,7 @@ try {
   assert.equal(await p.locator('input[type="date"]').inputValue(), '2026-10-08');
   assert.equal(await p.getByPlaceholder('مثال: فاتورة المياه أو مشاوير الجمعية').inputValue(), 'OPENAI *CHATGPT SUBSCR');
   assert.equal(await p.locator('#bank-message').inputValue(), '');
-  await p.getByRole('button', {name:'طعام', exact:true}).click();
+  await p.getByRole('button', {name:/طعام/}).click();
   const bankSaved = p.waitForResponse(r => r.url().endsWith('/api/transactions') && r.request().method() === 'POST');
   await p.getByRole('button', {name:/حفظ.*المصروف/}).click();
   assert.equal((await bankSaved).status(), 200);
