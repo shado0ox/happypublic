@@ -1,3 +1,6 @@
+import FamilyStatement from './FamilyStatement';
+import ExpenseCategories from './ExpenseCategories';
+import { cached, cache, enqueue, flushWrites, writes, clearFamilyCache, discardWrite } from '../utils/offlineStore';
 import BankMessageInput from './BankMessageInput';
 import { normalizeNumericInput } from '../utils/numericInput';
 import React, { useEffect, useRef, useState } from "react";
@@ -31,6 +34,7 @@ type Entry = {
   source?: string;
   category?: string;
   note: string;
+  pending?: boolean;
 };
 type Bill = {
   id: string;
@@ -99,8 +103,8 @@ export default function FamilyWorkspace({
   onExpired: () => void;
 }) {
   const tr = (ar: string, en: string) => (isRTL ? ar : en);
-  const [families, setFamilies] = useState<Family[]>([]),
-    [selected, setSelected] = useState("");
+  const [families, setFamilies] = useState<Family[]>(()=>cached(uid,'families',[])),
+    [selected, setSelected] = useState(()=>cached(uid,'selectedFamily',''));
   const [data, setData] = useState<Snapshot | null>(null),
     [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false);
@@ -125,6 +129,10 @@ export default function FamilyWorkspace({
       alive.current = false;
     };
   }, []);
+  const [online,setOnline]=useState(navigator.onLine);
+  const [,setOutboxVersion]=useState(0);
+  const pending = writes(uid).filter(write=>write.familyId && write.url.endsWith('/transactions'));
+  const overlay=(snapshot:Snapshot):Snapshot=>({...snapshot,transactions:[...snapshot.transactions,...writes(uid).filter(write=>write.url.endsWith('/transactions')).filter(write=>write.familyId===snapshot.id && !write.error && !snapshot.transactions.some(row=>row.id===write.body.id)).map(write=>({...write.body,amountMinor:Math.round(Number(write.body.amount)*100),createdBy:uid,creatorName:'أنت — بانتظار المزامنة',pending:true}))]});
   const api = async (
     url: string,
     body?: unknown,
@@ -132,6 +140,7 @@ export default function FamilyWorkspace({
     signal?: AbortSignal,
   ) => {
     if (!alive.current) throw new DOMException("Screen closed", "AbortError");
+    if (!navigator.onLine) throw new Error('هذا الإجراء يحتاج اتصالًا؛ يمكنك تسجيل مصروف جديد محليًا');
     const response = await fetch(`/api/families${url}`, {
       method,
       signal,
@@ -161,9 +170,11 @@ export default function FamilyWorkspace({
   useEffect(() => {
     const controller = new AbortController(),
       version = ++scope.current;
-    setLoading(true);
-    setData(null);
+    const saved = selected ? cached<Snapshot|null>(uid,`family_${selected}`,null) : null;
+    setLoading(!saved && navigator.onLine);
+    setData(saved ? overlay(saved) : null);
     setError("");
+    if(!navigator.onLine){setFamilies(cached(uid,'families',[]));setLoading(false);return;}
     void (async () => {
       try {
         const list: Family[] = await api(
@@ -173,6 +184,9 @@ export default function FamilyWorkspace({
           controller.signal,
         );
         if (scope.current !== version) return;
+        const previous=cached<Family[]>(uid,'families',[]);
+        for(const old of previous)if(!list.some(item=>item.id===old.id))clearFamilyCache(uid,old.id);
+        cache(uid,'families',list);
         setFamilies(list);
         if (!selected) return;
         if (!list.some((f) => f.id === selected)) {
@@ -186,11 +200,11 @@ export default function FamilyWorkspace({
           "GET",
           controller.signal,
         );
-        if (scope.current === version) setData(snapshot);
+        if (scope.current === version) { setData(overlay(snapshot));try{cache(uid,`family_${selected}`,snapshot);}catch{setError('لا توجد مساحة كافية لتحديث نسخة الجهاز؛ البيانات الحالية من السيرفر');} }
       } catch (e) {
         if (!controller.signal.aborted && scope.current === version) {
           setError((e as Error).message);
-          if ((e as any).status === 404) setSelected("");
+          if ([403,404].includes((e as any).status)) {clearFamilyCache(uid,selected);setData(null);setSelected("");}
         }
       } finally {
         if (scope.current === version) setLoading(false);
@@ -200,22 +214,22 @@ export default function FamilyWorkspace({
       controller.abort();
       scope.current++;
     };
-  }, [uid, token, selected, refresh]);
+  }, [uid, token, selected, refresh, online]);
   useEffect(() => {
+    cache(uid,'selectedFamily',selected);
     setEntry(emptyEntry());
     setBill(emptyBill());
     setInviteToken("");
     setNotice("");
   }, [selected]);
   useEffect(() => {
-    const reload = () => setRefresh((v) => v + 1);
-    window.addEventListener("happy-home-family-sync", reload);
-    window.addEventListener("focus", reload);
-    return () => {
-      window.removeEventListener("happy-home-family-sync", reload);
-      window.removeEventListener("focus", reload);
-    };
-  }, []);
+    let timer:ReturnType<typeof setTimeout>;
+    const reload=()=>{clearTimeout(timer);if(navigator.onLine && !document.hidden)timer=setTimeout(()=>setRefresh(v=>v+1),750);};
+    const connection=()=>{setOnline(navigator.onLine);reload();};
+    const outbox=()=>{setOutboxVersion(v=>v+1);const saved=selected?cached<Snapshot|null>(uid,`family_${selected}`,null):null;if(saved)setData(overlay(saved));};
+    window.addEventListener('happy-home-family-sync',reload);window.addEventListener('online',connection);window.addEventListener('offline',connection);window.addEventListener('happy-outbox',outbox);
+    return()=>{clearTimeout(timer);window.removeEventListener('happy-home-family-sync',reload);window.removeEventListener('online',connection);window.removeEventListener('offline',connection);window.removeEventListener('happy-outbox',outbox);};
+  },[uid,selected]);
   const act = async (work: () => Promise<void | string>) => {
     if (busy) return;
     setBusy(true);
@@ -314,6 +328,8 @@ export default function FamilyWorkspace({
           <RefreshCw size={18} />
         </button>
       </div>
+      {!online && <p role="status">بدون إنترنت — آخر نسخة محفوظة؛ تغييرات الصلاحيات تتأكد عند الاتصال.</p>}
+      {pending.length>0 && <details className="family-panel"><summary>مسودات العائلة على هذا الجهاز ({pending.length})</summary>{pending.map(write=><div key={write.key}><p>{write.body.date} · {write.body.amount} · {write.body.note || write.body.category} · {write.error || 'بانتظار المزامنة'}</p><button type="button" onClick={()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(write.body,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='family-expense-draft.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}}>تنزيل المسودة</button>{write.error && <button type="button" onClick={()=>{if(confirm('حذف هذه المسودة من الجهاز؟'))discardWrite(uid,write.key);}}>حذف المسودة</button>}</div>)}</details>}
       {error && (
         <p role="alert" className="family-error">
           {error}
@@ -467,18 +483,24 @@ export default function FamilyWorkspace({
               </div>
             </div>
           </div>
+          <FamilyStatement rows={data.transactions} start={monthStart} end={monthEnd} name={data.name} currency={data.currency} />
           {data.role !== "viewer" && (
             <form
               className="family-panel"
               onSubmit={(e) => {
                 e.preventDefault();
                 void act(async () => {
-                  await api(`/${data.id}/transactions`, {
-                    ...entry,
-                    id: entry.id || crypto.randomUUID(),
-                    amount: Number(entry.amount),
-                  });
+                  const value=Number(entry.amount);
+                  if(!Number.isFinite(value) || value<=0 || value>1e9 || !/^\d+(?:\.\d{1,2})?$/.test(entry.amount))throw Error('أدخل مبلغًا صحيحًا حتى منزلتين عشريتين');
+                  if(entry.id) await api(`/${data.id}/transactions`,{...entry,amount:value});
+                  else {
+                    const payload={...entry,id:crypto.randomUUID(),amount:value};
+                    enqueue(uid,{url:`/api/families/${data.id}/transactions`,body:payload,familyId:data.id});
+                    setData(overlay(cached<Snapshot>(uid,`family_${data.id}`,data)));
+                    if(navigator.onLine)void flushWrites(uid,token);
+                  }
                   setEntry(emptyEntry());
+                  return 'تم الحفظ على الجهاز؛ تتم المزامنة عند الاتصال';
                 });
               }}
             >
@@ -517,6 +539,7 @@ export default function FamilyWorkspace({
                     }
                   />
                 </Field>
+                {entry.type === 'expense' && <ExpenseCategories uid={uid} token={token} familyId={data.id} value={entry.category} onChange={category=>setEntry({...entry,category})} />}
                 <Field label={tr("التاريخ", "Date")}>
                   <input
                     required
@@ -595,7 +618,8 @@ export default function FamilyWorkspace({
                     </span>
                     {t.note && <p>{t.note}</p>}
                   </div>
-                  {canEdit(t.createdBy) && (
+                  {t.pending && <span>بانتظار المزامنة</span>}
+                  {!t.pending && online && canEdit(t.createdBy) && (
                     <div className="family-actions">
                       <button
                         type="button"
@@ -1093,7 +1117,7 @@ export default function FamilyWorkspace({
                 disabled={busy}
                 onClick={() =>
                   void act(async () => {
-                    const bundle = await api(`/${data.id}/export`);
+                    const bundle = navigator.onLine ? await api(`/${data.id}/export`) : {format:'happy-home-family-v1',exportedAt:new Date().toISOString(),offline:true,family:{name:data.name,currency:data.currency,cycleStart:data.cycleStart},transactions:data.transactions,recurring_bills:data.recurring_bills,categories:cached(uid,`categories_${data.id}`,[])};
                     const url = URL.createObjectURL(
                       new Blob([JSON.stringify(bundle, null, 2)], {
                         type: "application/json",

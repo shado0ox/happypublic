@@ -228,6 +228,27 @@ test(
         );
       },
     );
+    await t.test('custom expense categories are scoped, idempotent and enforce membership roles', async()=>{
+      assert.equal((await req('/api/categories',owner,{name:'حيوانات أليفة'})).status,200);
+      assert.deepEqual((await req('/api/categories',stranger)).data,[]);
+      assert.deepEqual((await req('/api/categories',owner,{name:'حيوانات أليفة'})).data,['حيوانات أليفة']);
+      const endpoint=`/api/families/${family}/categories`;
+      assert.equal((await req(endpoint,editor,{name:'سكن'})).status,200);
+      assert.deepEqual((await req(endpoint,viewer)).data,['سكن']);
+      assert.equal((await req(endpoint,viewer,{name:'ممنوع'})).status,403);
+      assert.equal((await req(endpoint,stranger)).status,404);
+      assert.equal((await req('/api/categories',owner,{name:''})).status,400);
+      assert.deepEqual((await req('/api/export',owner)).data.categories,['حيوانات أليفة']);
+      assert.equal((await req('/api/import',owner,{categories:['هوايات']})).status,200);
+      assert.deepEqual((await req('/api/categories',owner)).data,['حيوانات أليفة','هوايات']);
+      const backup=(await req(`/api/families/${family}/export`,owner)).data;
+      assert.deepEqual(backup.categories,['سكن']);
+      assert.equal((await req(`/api/families/${family}/import`,owner,{family:{currency:backup.family.currency},categories:['هوايات']})).status,200);
+      assert.deepEqual((await req(endpoint,viewer)).data,['سكن','هوايات']);
+      assert.equal((await req(`/api/families/${family}/import`,owner,{family:{currency:backup.family.currency},categories:['invalid merge'],transactions:[{id:'invalid',amount:-1,type:'expense',date:'2026-10-01'}]})).status,400);
+      assert.deepEqual((await req(endpoint,viewer)).data,['سكن','هوايات']);
+
+    });
     await t.test(
       "viewers cannot write, import, invite or change settings; editors edit only their records",
       async () => {

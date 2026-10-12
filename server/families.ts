@@ -338,6 +338,7 @@ export function mountFamilies(
         role: m.role,
         transactions: rows(id, "transactions"),
         recurring_bills: rows(id, "bills"),
+        categories: (db.prepare("SELECT name FROM ledger_categories WHERE scope='family' AND scopeId=? ORDER BY name").all(id) as any[]).map(row=>row.name),
         members: db
           .prepare(
             "SELECT m.uid,m.role,m.joinedAt,u.name FROM family_members m JOIN users u ON u.uid=m.uid WHERE familyId=? ORDER BY joinedAt",
@@ -615,6 +616,7 @@ export function mountFamilies(
           .get(id),
         transactions: rows(id, "transactions"),
         recurring_bills: rows(id, "bills"),
+        categories: (db.prepare("SELECT name FROM ledger_categories WHERE scope='family' AND scopeId=? ORDER BY name").all(id) as any[]).map(row=>row.name),
       });
     }),
   );
@@ -645,11 +647,14 @@ export function mountFamilies(
           throw new HttpError(400, "معرفات مكررة في ملف الاستيراد");
         return input;
       };
+      const categories=v.categories===undefined?[]:(Array.isArray(v.categories) && v.categories.length<=100?v.categories.map(name=>text(name,80,true).trim()):(()=>{throw new HttpError(400,'تصنيفات غير صالحة');})());
       const txs = validate(v.transactions, "transactions"),
         bills = validate(v.recurring_bills, "bills");
-      if (!txs.length && !bills.length)
+      if (!txs.length && !bills.length && !categories.length)
         throw new HttpError(400, "ملف الاستيراد فارغ");
       db.transaction(() => {
+        for(const name of categories)db.prepare("INSERT OR IGNORE INTO ledger_categories VALUES ('family',?,?)").run(id,name);
+        if((db.prepare("SELECT count(*) AS n FROM ledger_categories WHERE scope='family' AND scopeId=?").get(id) as any).n>100)throw new HttpError(400,'تصنيفات كثيرة');
         for (const tx of txs) saveRow(id, uid, m.role, "transactions", tx);
         for (const bill of bills) saveRow(id, uid, m.role, "bills", bill);
         audit(id, uid, "bundle_imported");
