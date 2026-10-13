@@ -189,7 +189,6 @@ export default function App() {
     "« ليس المهم كم تجني، بل المهم كم تدّخر وكيف تبني مستقبلك »"
   ];
   const [splashSlogan, setSplashSlogan] = useState(slogans[0]);
-  const [showInstallPrompt, setShowInstallPrompt] = useState(false);
 
   useEffect(() => {
     let index = 0;
@@ -201,16 +200,6 @@ export default function App() {
     const timer = setTimeout(() => {
       setShowSplash(false);
     }, localStorage.getItem('albait_user') ? 120 : 500);
-
-    // Check standalone mode
-    // @ts-ignore
-    const isStandalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
-    const isDismissed = localStorage.getItem('albait_install_dismissed') === 'true';
-    if (!isStandalone && !isDismissed) {
-      setTimeout(() => {
-        setShowInstallPrompt(true);
-      }, 3500);
-    }
 
     return () => {
       clearInterval(interval);
@@ -2594,84 +2583,6 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
         </div>
         {activeTab === 'family' && <Suspense fallback={<p>فتح دفتر العائلة…</p>}><FamilyWorkspace key={currentUser.uid} uid={currentUser.uid} token={getSessionToken(currentUser.uid)} isRTL={isRTL} onExpired={() => { checkAuthStatus(401); }} /></Suspense>}
 
-
-        {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
-        <AnimatePresence>
-          {showInstallPrompt && (
-            <motion.div
-              initial={{ opacity: 0, y: -20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="bg-gradient-to-r from-[#0a7c6b] to-[#128a78] text-white p-4 rounded-2xl shadow-lg border border-[#a8ffec]/20 relative overflow-hidden text-right"
-            >
-              {/* Background elements */}
-              <div className="absolute top-10 right-10 w-24 h-24 rounded-full bg-white/5 blur-xl pointer-events-none" />
-
-              {/* Header info */}
-              <div className="flex items-start justify-between gap-2 border-b border-white/20 pb-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl">📱</span>
-                  <div>
-                    <h4 className="text-xs font-black font-display tracking-tight">تثبيت تطبيق البيت السعيد للجوال</h4>
-                    <p className="text-[10px] text-teal-100 mt-0.5 font-bold">للحصول على وصول فائق السرعة، ومظهر رائع مباشرة من شاشتك الرئيسية</p>
-                  </div>
-                </div>
-                
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowInstallPrompt(false);
-                    localStorage.setItem('albait_install_dismissed', 'true');
-                    triggerToast('تم إخفاء التنبيه بنجاح');
-                  }}
-                  className="w-6 h-6 rounded-full bg-black/10 hover:bg-black/20 text-white flex items-center justify-center shrink-0 cursor-pointer transition-colors"
-                  title="إغلاق التنبيه"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-
-              {/* Core instructions */}
-              <div className="mt-3 space-y-2.5">
-                <p className="text-[10px] font-bold text-teal-50">اختر طريقة التثبيت حسب نوع هاتفك:</p>
-                
-                <div className="grid grid-cols-2 gap-3">
-                  {/* iOS Safari Guide */}
-                  <div className="bg-white/10 rounded-xl p-2.5 border border-white/5">
-                    <div className="flex items-center gap-1.5 mb-1.5 justify-end">
-                      <span className="text-[10.5px] font-black text-white">متصفح سفاري (آيفون)</span>
-                      <div className="w-5 h-5 rounded bg-white text-teal-700 font-bold text-[10px] flex items-center justify-center font-mono">iOS</div>
-                    </div>
-                    <ol className="text-[9.5px] leading-relaxed text-teal-50 list-decimal list-inside space-y-1">
-                      <li>اضغط أيقونة المشاركة <Share2 className="w-2.5 h-2.5 inline-block mx-0.5" /> في الأسفل</li>
-                      <li>اسحب الشاشة واختر <strong className="text-white">"إضافة للشاشة الرئيسية"</strong> ➕</li>
-                      <li>اضغط على <strong className="text-white">"إضافة"</strong> للتأكيد</li>
-                    </ol>
-                  </div>
-
-                  {/* Android Chrome Guide */}
-                  <div className="bg-white/10 rounded-xl p-2.5 border border-white/5">
-                    <div className="flex items-center gap-1.5 mb-1.5 justify-end">
-                      <span className="text-[10.5px] font-black text-white">كروم (أندرويد)</span>
-                      <div className="w-5 h-5 rounded bg-white text-teal-700 font-bold text-[10px] flex items-center justify-center font-mono">And</div>
-                    </div>
-                    <ol className="text-[9.5px] leading-relaxed text-teal-50 list-decimal list-inside space-y-1">
-                      <li>اضغط رمز القائمة <strong className="text-white">(︙)</strong> في الأعلى</li>
-                      <li>اختر <strong className="text-white">"تثبيت التطبيق"</strong> أو <strong className="text-white">"إضافة"</strong> ➕</li>
-                      <li>أكّد العملية لتثبيت الأيقونة</li>
-                    </ol>
-                  </div>
-                </div>
-
-                <div className="text-[9px] text-[#ffdcb3] font-bold text-center pt-1 border-t border-white/10 flex items-center justify-center gap-1">
-                  <span>✨</span>
-                  <span>افتح التطبيق مباشرة من الشاشة الرئيسية بعد تثبيته</span>
-                </div>
-              </div>
-
-            </motion.div>
-          )}
-        </AnimatePresence>
 
         {/* Dashboard View */}
         <OfflineStatus uid={currentUser.uid} token={currentUser.token} blocked={!!expenseAmount || !!incomeAmount || settingsSaving || activeTab==='family' || getPendingOps(currentUser.uid).length>0} />

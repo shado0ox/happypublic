@@ -145,3 +145,25 @@ body { margin: 0; background: var(--home-paper); }
   body.family-print .family-statement .overflow-x-auto { overflow: visible; }
   body.family-print .family-statement th, body.family-print .family-statement td { border-bottom: 1px solid #ccc; padding: 6px; }
 }
+
+.install-offer { display:flex; align-items:center; gap:10px; padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left)); background:#fffdf7; border-bottom:1px solid #ddd0b8; color:#2c1f0e; }
+.install-offer img { border-radius:9px; flex-shrink:0; object-fit:cover; }
+.install-offer-copy { flex:1; min-width:0; display:grid; gap:2px; }
+.install-offer-copy strong { font-size:13px; }.install-offer-copy span { font-size:11px; color:#7a6a52; }
+.install-get { padding:8px 19px; min-height:40px; border-radius:20px; background:#0a7c6b; color:white; font-size:13px; font-weight:800; }
+.install-offer-dismiss { color:#7a6a52; min-height:36px; min-width:28px; display:grid; place-items:center; }
+.install-guide { position:fixed; inset:0; margin:auto; width:min(360px,calc(100vw - 28px)); max-height:calc(100dvh - 40px); overflow:auto; border:1px solid #ddd0b8; border-radius:22px; padding:20px; background:#fffdf7; color:#2c1f0e; box-shadow:0 24px 70px #132f2940; }
+.install-guide::backdrop { background:#152c2866; backdrop-filter:blur(3px); }
+.install-guide-head { display:flex; justify-content:space-between; align-items:center; gap:10px; }.install-guide-head span { font-size:10px; color:#0a7c6b; }.install-guide h2 { font-size:20px; font-weight:800; }.install-guide-head button { min-width:40px; min-height:40px; display:grid; place-items:center; }
+.install-guide-intro { font-size:12px; color:#7a6a52; margin:6px 0 14px; }
+.install-platforms { display:flex; gap:4px; margin-bottom:14px; }.install-platforms button { flex:1; min-height:35px; font-size:10px; border:1px solid #ddd0b8; border-radius:8px; }.install-platforms button[aria-pressed=true] { color:#0a7c6b; background:#e0f5f2; border-color:#0a7c6b; }
+.install-steps { display:grid; gap:12px; list-style:none; padding:0; }.install-steps li { display:flex; gap:12px; align-items:center; }.install-steps strong { font-size:12px; }.install-steps p { font-size:11px; line-height:1.6; color:#7a6a52; margin-top:3px; }.install-step-number { display:inline-grid; place-items:center; width:19px; height:19px; border-radius:50%; background:#e0f5f2; color:#0a7c6b; font-size:10px; margin-left:5px; }
+.install-mini { width:58px; height:68px; border:2px solid #d3dcd8; background:white; border-radius:9px; padding:6px; flex-shrink:0; }.install-mini-screen { display:grid; gap:3px; }.install-mini-screen>span { display:block; height:3px; width:30px; background:#e5eae7; border-radius:4px; }.install-mini-target { margin:3px auto 1px; width:30px; height:29px; border:1px solid #a4d9cc; background:#e0f5f2; border-radius:6px; display:grid; place-items:center; color:#0a7c6b; }.install-mini-bottom { width:17px; height:2px; background:#b4bdb8; border-radius:3px; margin:3px auto; }
+.install-direct { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:10px; margin-top:15px; background:#0a7c6b; color:white; border-radius:10px; font-size:12px; font-weight:700; }.install-guide-foot { font-size:10px; color:#7a6a52; margin-top:14px; line-height:1.6; }.install-guide button:focus-visible,.install-offer button:focus-visible { outline:3px solid #e67e22; outline-offset:3px; }
+@media print { .install-offer,.install-guide { display:none!important; } }
+.install-guide { padding:16px; aspect-ratio:auto; min-height:350px; max-width:calc(100vw - 28px); }
+.install-steps { grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.install-steps li { flex-direction:column; text-align:center; gap:8px; min-width:0; }
+.install-steps strong { display:block; font-size:11px; line-height:1.5; }
+.install-step-number { margin:0 0 4px; }
+.install-guide-foot { margin-top:10px; }

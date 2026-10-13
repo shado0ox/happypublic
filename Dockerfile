@@ -5,6 +5,10 @@ RUN apk add --no-cache python3 make g++
 COPY package*.json ./
 RUN npm ci
 COPY . .
+ARG VITE_APP_STORE_URL=""
+ARG VITE_PLAY_STORE_URL=""
+ENV VITE_APP_STORE_URL=$VITE_APP_STORE_URL
+ENV VITE_PLAY_STORE_URL=$VITE_PLAY_STORE_URL
 RUN npm run build
 
 # 2. مرحلة التشغيل النهائية (Production Stage)
