@@ -2,7 +2,11 @@ version: '3.8'
 
 services:
   happy-home-app:
-    build: .
+    build:
+      context: .
+      args:
+        VITE_APP_STORE_URL: ${VITE_APP_STORE_URL:-}
+        VITE_PLAY_STORE_URL: ${VITE_PLAY_STORE_URL:-}
     container_name: happy-home-app
     ports:
       - "127.0.0.1:3000:3000"
