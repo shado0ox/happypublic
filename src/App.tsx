@@ -1,4 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { personalOps, putPersonalOp, acknowledgePersonalOp, rejectPersonalOp } from './utils/personalQueue';
+import OfflineStatus from './components/OfflineStatus';
+import ExpenseCategories from './components/ExpenseCategories';
+import { mergePending, writes, cached } from './utils/offlineStore';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import {
   translations,
   CURRENCIES,
@@ -47,19 +51,10 @@ import {
   VolumeX
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import {
-  ResponsiveContainer,
-  PieChart as RechartsPieChart,
-  Pie,
-  Cell,
-  BarChart as RechartsBarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip as RechartsTooltip
-} from 'recharts';
+
 import SwipeableTransactionItem from './components/SwipeableTransactionItem';
-import FamilyWorkspace from './components/FamilyWorkspace';
+const FamilyWorkspace=lazy(()=>import('./components/FamilyWorkspace'));
+const ExpenseCharts=lazy(()=>import('./components/ExpenseCharts'));
 import BankMessageInput from './components/BankMessageInput';
 import { normalizeNumericInput } from './utils/numericInput';
 import VoiceAssistant, { VoiceParsedResult } from './components/VoiceAssistant';
@@ -205,7 +200,7 @@ export default function App() {
 
     const timer = setTimeout(() => {
       setShowSplash(false);
-    }, 2450);
+    }, localStorage.getItem('albait_user') ? 120 : 500);
 
     // Check standalone mode
     // @ts-ignore
@@ -246,6 +241,8 @@ export default function App() {
   const [expenseCategory, setExpenseCategory] = useState('طعام وشراب');
   const [expenseDate, setExpenseDate] = useState(new Date().toISOString().split('T')[0]);
   const [expenseDesc, setExpenseDesc] = useState('');
+
+  const allExpenseCategories=[...new Set([...Object.keys(CAT_EMOJIS).slice(0,9),...transactions.filter(row=>row.type==='expense' && row.category).map(row=>row.category!),...(currentUser?cached<string[]>(currentUser.uid,'categories_personal',[]):[])])];
 
   // Toast notifications
   const [toastMessage, setToastMessage] = useState('');
@@ -340,11 +337,15 @@ export default function App() {
     let eventSource: EventSource | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const controller = new AbortController();
-    const onMessage = async (event: MessageEvent) => {
+    let burstTimer:ReturnType<typeof setTimeout>, backoff=3000, connecting=false;
+    const handleMessage = async (event: MessageEvent) => {
+      if(document.hidden || !navigator.onLine) return;
       try {
         const payload = JSON.parse(event.data);
         if (payload.type === 'sync_required') {
-          window.dispatchEvent(new Event('happy-home-family-sync'));
+          if(payload.scope==='family' || !payload.scope)window.dispatchEvent(new Event('happy-home-family-sync'));
+          if(payload.scope==='categories')window.dispatchEvent(new Event('happy-categories-sync'));
+          if(payload.scope==='family' || payload.scope==='categories')return;
           console.log('⚡ Real-time sync update triggered from server!');
           await fetchTransactions(currentUser.uid);
           await fetchRecurringBills(currentUser.uid);
@@ -357,6 +358,7 @@ export default function App() {
                 'x-auth-token': currentUser.token || ''
               }
             });
+            if(!activeSession(currentUser.uid,currentUser.token || ''))return;
             if (checkAuthStatus(settingsRes.status)) return;
             const fetchedSettings = await settingsRes.json();
             if (fetchedSettings && !fetchedSettings.error) {
@@ -379,34 +381,42 @@ export default function App() {
       }
     };
 
+    const onMessage=(event:MessageEvent)=>{clearTimeout(burstTimer);burstTimer=setTimeout(()=>{void handleMessage(event);},750);};
     const connect = async () => {
+      if(disposed || !navigator.onLine || document.hidden || connecting || eventSource?.readyState===EventSource.OPEN) return;
+      connecting=true;
       try {
         const response = await fetch('/api/sync/ticket', {
           method: 'POST', signal: controller.signal,
           headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
         });
-        if (disposed || checkAuthStatus(response.status)) return;
+        if(disposed || !activeSession(currentUser.uid,currentUser.token || ''))return;
+        if (checkAuthStatus(response.status)) return;
         if (!response.ok) throw new Error('Unable to create sync ticket');
         const { ticket } = await response.json();
-        if (disposed) return;
+        if (disposed || !navigator.onLine || document.hidden) return;
         eventSource = new EventSource(`/api/sync/stream?ticket=${encodeURIComponent(ticket)}`);
+        eventSource.onopen=()=>{sseActive.current=true;backoff=3000;};
         eventSource.onmessage = onMessage;
         eventSource.onerror = () => {
-          eventSource?.close();
-          if (!disposed) reconnectTimer = setTimeout(connect, 3000);
+          sseActive.current=false;eventSource?.close();
+          if (!disposed && navigator.onLine && !document.hidden) {reconnectTimer = setTimeout(connect, backoff);backoff=Math.min(60000,backoff*2);}
         };
       } catch {
-        if (!disposed) reconnectTimer = setTimeout(connect, 3000);
-      }
+        if (!disposed && navigator.onLine && !document.hidden) {reconnectTimer = setTimeout(connect, backoff);backoff=Math.min(60000,backoff*2);}
+      } finally {connecting=false;}
     };
+    const resume=()=>{if(document.hidden || !navigator.onLine){clearTimeout(reconnectTimer);eventSource?.close();sseActive.current=false;}else void connect();};
+    window.addEventListener('online',resume);window.addEventListener('offline',resume);document.addEventListener('visibilitychange',resume);
     void connect();
     return () => {
       disposed = true;
+      sseActive.current=false;clearTimeout(burstTimer);window.removeEventListener('online',resume);window.removeEventListener('offline',resume);document.removeEventListener('visibilitychange',resume);
       controller.abort();
       clearTimeout(reconnectTimer);
       eventSource?.close();
     };
-  }, [currentUser, settings.realTimeSync]);
+  }, [currentUser?.uid, currentUser?.token, settings.realTimeSync]);
 
   const getSessionToken = (uid: string) => {
     try {
@@ -416,28 +426,19 @@ export default function App() {
     return currentUser?.uid === uid ? currentUser.token || '' : '';
   };
 
+  const activeSession=(uid:string,token:string)=>{try{const profile=JSON.parse(localStorage.getItem('albait_user')||'null');return profile?.uid===uid && profile?.token===token;}catch{return false;}};
+
   // Helper functions for Offline Synchronization Queue
-  const getPendingOps = (uid: string): any[] => {
-    const raw = localStorage.getItem(`albait_pending_${uid}`);
-    if (!raw) return [];
-    try { return JSON.parse(raw); } catch (_) { return []; }
-  };
+  const getPendingOps = personalOps;
+  const addPendingOp = putPersonalOp;
 
-  const savePendingOps = (uid: string, ops: any[]) => {
-    localStorage.setItem(`albait_pending_${uid}`, JSON.stringify(ops));
-  };
-
-  const addPendingOp = (uid: string, op: { type: string; id: string; payload: any }) => {
-    const ops = getPendingOps(uid);
-    // Remove existing pending operations for the same ID to prevent duplicates
-    const filtered = ops.filter(o => !(o.id === op.id && o.type === op.type));
-    filtered.push(op);
-    savePendingOps(uid, filtered);
-  };
-
+  const queueBusy = useRef(false);
   const processPendingQueue = async (uid: string) => {
-    const ops = getPendingOps(uid);
-    if (ops.length === 0) return true;
+    if (!navigator.onLine || queueBusy.current) return false;
+    queueBusy.current = true;
+    try {
+    const ops = getPendingOps(uid).filter(op=>!op.error).slice(0,50);
+    if (ops.length === 0) return getPendingOps(uid).length===0;
 
     console.log(`Processing ${ops.length} pending offline operations for user: ${uid}...`);
     const remainingOps = [...ops];
@@ -454,10 +455,13 @@ export default function App() {
               'x-user-uid': uid,
               'x-auth-token': token
             },
+            signal: AbortSignal.timeout(10000),
             body: JSON.stringify(op.payload)
           });
+          if(!activeSession(uid,token))return false;
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
+          if([400,403,404,409].includes(res.status)) {const data=await res.json().catch(()=>({}));rejectPersonalOp(uid,op,data.error || 'لم يقبل السيرفر العملية؛ راجع المسودة');}
         } else if (op.type === 'DELETE_TX') {
           const res = await fetch(`/api/transactions/${op.id}`, {
             method: 'DELETE',
@@ -466,8 +470,10 @@ export default function App() {
               'x-auth-token': token
             }
           });
+          if(!activeSession(uid,token))return false;
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
+          if([400,403,404,409].includes(res.status)) {const data=await res.json().catch(()=>({}));rejectPersonalOp(uid,op,data.error || 'لم يقبل السيرفر العملية؛ راجع المسودة');}
         } else if (op.type === 'POST_BILL') {
           const res = await fetch('/api/recurring-bills', {
             method: 'POST',
@@ -476,10 +482,13 @@ export default function App() {
               'x-user-uid': uid,
               'x-auth-token': token
             },
+            signal: AbortSignal.timeout(10000),
             body: JSON.stringify(op.payload)
           });
+          if(!activeSession(uid,token))return false;
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
+          if([400,403,404,409].includes(res.status)) {const data=await res.json().catch(()=>({}));rejectPersonalOp(uid,op,data.error || 'لم يقبل السيرفر العملية؛ راجع المسودة');}
         } else if (op.type === 'DELETE_BILL') {
           const res = await fetch(`/api/recurring-bills/${op.id}`, {
             method: 'DELETE',
@@ -488,8 +497,10 @@ export default function App() {
               'x-auth-token': token
             }
           });
+          if(!activeSession(uid,token))return false;
           if (checkAuthStatus(res.status)) return false;
           success = res.ok;
+          if([400,403,404,409].includes(res.status)) {const data=await res.json().catch(()=>({}));rejectPersonalOp(uid,op,data.error || 'لم يقبل السيرفر العملية؛ راجع المسودة');}
         }
 
         if (success) {
@@ -504,13 +515,15 @@ export default function App() {
       }
     }
 
-    savePendingOps(uid, remainingOps);
+    const completed = ops.filter(op => !remainingOps.includes(op));
+    for(const op of completed)acknowledgePersonalOp(uid,op);
     
-    if (remainingOps.length === 0 && ops.length > 0) {
+    if (getPendingOps(uid).length === 0 && ops.length > 0) {
       triggerToast('🔄 تم مزامنة العمليات المحفوظة محلياً مع السيرفر بنجاح!');
       return true;
     }
-    return remainingOps.length === 0;
+    return getPendingOps(uid).length === 0;
+    } finally { queueBusy.current = false; }
   };
 
   // Quick Check localStorage for session
@@ -526,14 +539,17 @@ export default function App() {
           // Instantly load cached offline data to prevent visual delay
           const localTxs = localStorage.getItem(`albait_txs_${parsed.uid}`);
           if (localTxs) {
-            try { setTransactions(JSON.parse(localTxs)); } catch (_) {}
+            try { setTransactions(mergePending<Transaction>(JSON.parse(localTxs),getPendingOps(parsed.uid),'TX')); } catch (_) {}
           }
+          if(!localTxs)setTransactions(mergePending<Transaction>([],getPendingOps(parsed.uid),'TX'));
           const localBills = localStorage.getItem(`albait_bills_${parsed.uid}`);
           if (localBills) {
             try { setRecurringBills(JSON.parse(localBills)); } catch (_) {}
           }
 
-          syncUserAndFetch(parsed);
+          const storedSettings = localStorage.getItem(`albait_settings_${parsed.uid}`);
+          if(storedSettings) { try { setSettings(JSON.parse(storedSettings)); } catch {} }
+          if(navigator.onLine) void syncUserAndFetch(parsed);
           if (cachedLock === 'true') {
             setIsLocked(true);
           }
@@ -549,32 +565,35 @@ export default function App() {
     }
   }, []);
 
-  // Periodic Sync Interval (Automated fallback synchronization when SSE is blocked/inactive)
+  const sseActive = useRef(false);
   useEffect(() => {
     if (!currentUser) return;
+    let running=false, lastPull=Date.now();
+    const sync = async (force=false) => {
+      if(running || !navigator.onLine || document.hidden) return;
+      running=true;
+      try {
+        const pending=getPendingOps(currentUser.uid).length;
+        const synced=await processPendingQueue(currentUser.uid);
+        if(synced && (force || pending || (!sseActive.current && Date.now()-lastPull>=300000))) {
+          lastPull=Date.now();
+          await Promise.all([fetchTransactions(currentUser.uid),fetchRecurringBills(currentUser.uid)]);
+        }
+      } finally { running=false; }
+    };
+    let lastResume=0;
+    const resumed=()=>{if(Date.now()-lastResume<10000)return;lastResume=Date.now();void sync(true);};
+    const periodic=setInterval(()=>{void sync();},300000);
+    window.addEventListener('happy-force-sync',resumed);window.addEventListener('online',resumed); window.addEventListener('focus',resumed); document.addEventListener('visibilitychange',resumed);
+    if(getPendingOps(currentUser.uid).some(op=>!op.error))void sync();
+    return()=>{clearInterval(periodic);window.removeEventListener('happy-force-sync',resumed);window.removeEventListener('online',resumed);window.removeEventListener('focus',resumed);document.removeEventListener('visibilitychange',resumed);};
+  }, [currentUser?.uid, currentUser?.token]);
+  useEffect(()=>{
+    if(currentUser) {try{localStorage.setItem(`albait_settings_${currentUser.uid}`,JSON.stringify(settings));}catch{}}
+  },[settings,currentUser?.uid]);
+  useEffect(()=>{const expired=(event:Event)=>{const active=JSON.parse(localStorage.getItem('albait_user')||'null');if(active?.uid===(event as CustomEvent).detail?.uid && active?.token===(event as CustomEvent).detail?.token)checkAuthStatus(401);};window.addEventListener('happy-session-expired',expired);return()=>window.removeEventListener('happy-session-expired',expired);},[]);
 
-    // Process pending ops immediately
-    processPendingQueue(currentUser.uid).then(async (allSynced) => {
-      if (allSynced) {
-        await fetchTransactions(currentUser.uid);
-        await fetchRecurringBills(currentUser.uid);
-      }
-    });
-
-    const intervalId = setInterval(async () => {
-      // 1. Process pending offline operations first
-      const allSynced = await processPendingQueue(currentUser.uid);
-
-      // 2. Fallback check for remote updates if no pending offline changes and window/tab is visible
-      if (allSynced && document.visibilityState === 'visible') {
-        console.log('🔄 Checking for remote database updates...');
-        await fetchTransactions(currentUser.uid);
-        await fetchRecurringBills(currentUser.uid);
-      }
-    }, 15000); // Trigger check/pull every 15 seconds
-
-    return () => clearInterval(intervalId);
-  }, [currentUser]);
+  useEffect(()=>{const changed=(event:Event)=>{if((event as CustomEvent).detail?.uid!==currentUser?.uid)return;try{setTransactions(JSON.parse(localStorage.getItem(`albait_txs_${currentUser.uid}`)||'[]'));setRecurringBills(JSON.parse(localStorage.getItem(`albait_bills_${currentUser.uid}`)||'[]'));}catch{}};window.addEventListener('happy-local-financial-change',changed);return()=>window.removeEventListener('happy-local-financial-change',changed);},[currentUser?.uid]);
 
   // Show customized toasts
   const triggerToast = (msg: string, isError = false) => {
@@ -586,12 +605,14 @@ export default function App() {
 
   // REST Backend Sync
   const syncUserAndFetch = async (profile: UserProfile) => {
+    if (!navigator.onLine) return;
     try {
       const res = await fetch('/api/user/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-user-uid': profile.uid, 'x-auth-token': profile.token || '' },
         body: JSON.stringify({})
       });
+      if(!activeSession(profile.uid,profile.token || ''))return;
       if (checkAuthStatus(res.status)) return;
       if (!res.ok) {
         throw new Error(`Server responded with status: ${res.status}`);
@@ -631,6 +652,7 @@ export default function App() {
   };
 
   const fetchTransactions = async (uid: string) => {
+    if (!navigator.onLine) return;
     try {
       const token = getSessionToken(uid);
       const res = await fetch(`/api/transactions?uid=${uid}`, {
@@ -639,6 +661,7 @@ export default function App() {
           'x-auth-token': token
         }
       });
+      if(!activeSession(uid,token))return;
       if (checkAuthStatus(res.status)) return;
       if (!res.ok) {
         throw new Error(`Server responded with status: ${res.status}`);
@@ -649,8 +672,9 @@ export default function App() {
       }
       const data = await res.json();
       if (Array.isArray(data)) {
-        setTransactions(data);
-        localStorage.setItem(`albait_txs_${uid}`, JSON.stringify(data));
+        const merged=mergePending<Transaction>(data,getPendingOps(uid),'TX');
+        setTransactions(merged);
+        try { localStorage.setItem(`albait_txs_${uid}`, JSON.stringify(merged)); } catch { console.warn('Unable to update offline snapshot'); }
       }
     } catch (e) {
       console.error('Error fetching transactions:', e);
@@ -663,6 +687,7 @@ export default function App() {
   };
 
   const fetchRecurringBills = async (uid: string) => {
+    if (!navigator.onLine) return;
     try {
       const token = getSessionToken(uid);
       const res = await fetch(`/api/recurring-bills?uid=${uid}`, {
@@ -671,6 +696,7 @@ export default function App() {
           'x-auth-token': token
         }
       });
+      if(!activeSession(uid,token))return;
       if (checkAuthStatus(res.status)) return;
       if (!res.ok) {
         throw new Error(`Server responded with status: ${res.status}`);
@@ -681,8 +707,9 @@ export default function App() {
       }
       const data = await res.json();
       if (Array.isArray(data)) {
-        setRecurringBills(data);
-        localStorage.setItem(`albait_bills_${uid}`, JSON.stringify(data));
+        const merged=mergePending<RecurringBill>(data,getPendingOps(uid),'BILL');
+        setRecurringBills(merged);
+        try { localStorage.setItem(`albait_bills_${uid}`, JSON.stringify(merged)); } catch { console.warn('Unable to update offline snapshot'); }
       }
     } catch (e) {
       console.error('Error fetching recurring bills:', e);
@@ -710,6 +737,7 @@ export default function App() {
     };
 
     // Optimistic UI update and cache writing
+    try {addPendingOp(currentUser.uid,{type:'POST_BILL',id:payload.id,payload});}catch{triggerToast('تعذر الحفظ المحلي',true);return;}
     const newBillItem: RecurringBill = {
       ...payload,
       uid: currentUser.uid,
@@ -717,13 +745,14 @@ export default function App() {
     };
     const updatedBills = [...recurringBills, newBillItem];
     setRecurringBills(updatedBills);
-    localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills));
+    try { localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills)); } catch { console.warn('Unable to update offline snapshot'); }
 
     triggerToast('🎉 تم إضافة الفاتورة بنجاح!');
     setRecTitle('');
     setRecAmount('');
     setRecDay(1);
 
+    if(!navigator.onLine){triggerToast('حُفظت الفاتورة على الجهاز؛ بانتظار الإنترنت');return;}
     try {
       const res = await fetch('/api/recurring-bills', {
         method: 'POST',
@@ -736,6 +765,7 @@ export default function App() {
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
+        acknowledgePersonalOp(currentUser.uid,{type:'POST_BILL',id:payload.id,payload});
         await fetchRecurringBills(currentUser.uid);
       } else {
         addPendingOp(currentUser.uid, { type: 'POST_BILL', id: payload.id, payload });
@@ -746,12 +776,13 @@ export default function App() {
   };
 
   const handleDeleteRecurringBill = async (id: string) => {
+    if(!navigator.onLine){triggerToast('الحذف يحتاج اتصالًا',true);return;}
     if (!currentUser) return;
 
     // Optimistic UI update and cache writing
     const updatedBills = recurringBills.filter(b => b.id !== id);
     setRecurringBills(updatedBills);
-    localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills));
+    try { localStorage.setItem(`albait_bills_${currentUser.uid}`, JSON.stringify(updatedBills)); } catch { console.warn('Unable to update offline snapshot'); }
     triggerToast('🗑️ تم إزالة الفاتورة المتكررة بنجاح');
 
     try {
@@ -831,6 +862,7 @@ export default function App() {
       userName: currentUser.name
     };
 
+    try { addPendingOp(currentUser.uid, { type: 'POST_TX', id: txId, payload: payload }); } catch { triggerToast('تعذر الحفظ المحلي؛ لم يتم مسح المدخلات', true); return; }
     // Optimistic UI update and cache writing
     const newTx: Transaction = {
       ...payload,
@@ -839,11 +871,12 @@ export default function App() {
     };
     const updatedTxs = [newTx, ...transactions];
     setTransactions(updatedTxs);
-    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+    try { localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs)); } catch { console.warn('Unable to update offline snapshot'); }
 
     triggerToast(`⚡ تم تسجيل صرف ${bill.title} فوراً كمعاملة موثقة!`);
     playTxnSound('expense');
 
+    if (!navigator.onLine) { triggerToast('تم الحفظ على الجهاز — بانتظار الإنترنت'); return; }
     try {
       const res = await fetch('/api/transactions', {
         method: 'POST',
@@ -856,6 +889,7 @@ export default function App() {
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
+        acknowledgePersonalOp(currentUser.uid,{type:'POST_TX',id:txId,payload});
         await fetchTransactions(currentUser.uid);
       } else {
         addPendingOp(currentUser.uid, { type: 'POST_TX', id: txId, payload });
@@ -1265,6 +1299,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (currentUser && (getPendingOps(currentUser.uid).length || writes(currentUser.uid).length)) { triggerToast('زامن أو صدّر العمليات المعلقة قبل تسجيل الخروج',true); return; }
     if (currentUser && confirm('هل تريد تسجيل الخروج؟')) {
       try {
         const response = await fetch('/api/user/logout', {
@@ -1276,6 +1311,7 @@ export default function App() {
         triggerToast('تعذر إلغاء جلسة السيرفر؛ حاول تسجيل الخروج عند الاتصال', true);
         return;
       }
+      for(const key of Object.keys(localStorage))if(key.startsWith(`happy_${currentUser.uid.length}_${currentUser.uid}_`) || key===`albait_settings_${currentUser.uid}`)localStorage.removeItem(key);
       localStorage.removeItem(`albait_txs_${currentUser.uid}`);
       localStorage.removeItem(`albait_bills_${currentUser.uid}`);
       const enrolled = { ...enrolledBioUsers };
@@ -1311,10 +1347,11 @@ export default function App() {
       userName: currentUser.name
     };
 
+    try { addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx }); } catch { triggerToast('تعذر الحفظ المحلي؛ لم يتم مسح المدخلات', true); return; }
     // Optimistic UI updates and instant cache writing
     const updatedTxs = [newTx, ...transactions];
     setTransactions(updatedTxs);
-    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+    try { localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs)); } catch { console.warn('Unable to update offline snapshot'); }
 
     setIncomeAmount('');
     setIncomeNote('');
@@ -1325,6 +1362,7 @@ export default function App() {
       setActiveTab('dashboard');
     }
 
+    if (!navigator.onLine) { triggerToast('تم الحفظ على الجهاز — بانتظار الإنترنت'); return; }
     try {
       const res = await fetch('/api/transactions', {
         method: 'POST',
@@ -1337,6 +1375,7 @@ export default function App() {
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
+        acknowledgePersonalOp(currentUser.uid,{type:'POST_TX',id:newTx.id,payload:newTx});
         await fetchTransactions(currentUser.uid);
       } else {
         addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
@@ -1384,10 +1423,11 @@ export default function App() {
       userName: currentUser.name
     };
 
+    try { addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx }); } catch { triggerToast('تعذر الحفظ المحلي؛ لم يتم مسح المدخلات', true); return; }
     // Optimistic UI updates and instant cache writing
     const updatedTxs = [newTx, ...transactions];
     setTransactions(updatedTxs);
-    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+    try { localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs)); } catch { console.warn('Unable to update offline snapshot'); }
 
     setExpenseAmount('');
     setExpenseDesc('');
@@ -1398,6 +1438,7 @@ export default function App() {
       setActiveTab('dashboard');
     }
 
+    if (!navigator.onLine) { triggerToast('تم الحفظ على الجهاز — بانتظار الإنترنت'); return; }
     try {
       const res = await fetch('/api/transactions', {
         method: 'POST',
@@ -1410,6 +1451,7 @@ export default function App() {
       });
       if (checkAuthStatus(res.status)) return;
       if (res.ok) {
+        acknowledgePersonalOp(currentUser.uid,{type:'POST_TX',id:newTx.id,payload:newTx});
         await fetchTransactions(currentUser.uid);
       } else {
         addPendingOp(currentUser.uid, { type: 'POST_TX', id: newTx.id, payload: newTx });
@@ -1442,6 +1484,7 @@ export default function App() {
 
    const handleDeleteTxn = async (id: string) => {
     if (!currentUser) return;
+    if (!navigator.onLine) {triggerToast('الحذف يحتاج اتصالًا؛ يمكنك إضافة مصروف جديد بدون إنترنت',true);return;}
     if (settings.confirmDelete && !confirm('هل أنت متأكد من حذف هذه المعاملة؟')) {
       return;
     }
@@ -1449,7 +1492,7 @@ export default function App() {
     // Optimistic UI updates and instant cache writing
     const updatedTxs = transactions.filter(t => t.id !== id);
     setTransactions(updatedTxs);
-    localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs));
+    try { localStorage.setItem(`albait_txs_${currentUser.uid}`, JSON.stringify(updatedTxs)); } catch { console.warn('Unable to update offline snapshot'); }
     triggerToast('تم الحذف بنجاح ✅');
 
     try {
@@ -1528,12 +1571,10 @@ export default function App() {
   const handleExportJSON = async () => {
     if (!currentUser) return;
     try {
-      const response = await fetch('/api/export', {
-        headers: { 'x-user-uid': currentUser.uid, 'x-auth-token': currentUser.token || '' },
-      });
-      if (checkAuthStatus(response.status)) return;
-      if (!response.ok) throw new Error('Export failed');
-      const url = URL.createObjectURL(await response.blob());
+      let bundle:any={exportedAt:new Date().toISOString(),offline:true,user:{uid:currentUser.uid,name:currentUser.name,email:currentUser.email},settings,transactions,recurring_bills:recurringBills,categories:cached<string[]>(currentUser.uid,'categories_personal',[])};
+      if(navigator.onLine){const response=await fetch('/api/export',{headers:{'x-user-uid':currentUser.uid,'x-auth-token':currentUser.token||''}});if(checkAuthStatus(response.status))return;if(!response.ok)throw Error('Export failed');bundle=await response.json();bundle.transactions=mergePending<Transaction>(bundle.transactions,getPendingOps(currentUser.uid),'TX');bundle.recurring_bills=mergePending<RecurringBill>(bundle.recurring_bills,getPendingOps(currentUser.uid),'BILL');}
+      bundle.pending_personal=getPendingOps(currentUser.uid);bundle.local_drafts=writes(currentUser.uid);
+      const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:'application/json'}));
       const link = document.createElement('a');
       link.href = url;
       link.download = `happy-home-${new Date().toISOString().slice(0, 10)}.json`;
@@ -2551,7 +2592,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
           <button type="button" aria-pressed={activeTab !== 'family'} onClick={() => setActiveTab('dashboard')}>{isRTL ? 'دفتر شخصي' : 'Personal ledger'}</button>
           <button type="button" aria-pressed={activeTab === 'family'} onClick={() => setActiveTab('family')}>{isRTL ? 'دفاتر العائلة' : 'Family ledgers'}</button>
         </div>
-        {activeTab === 'family' && <FamilyWorkspace key={currentUser.uid} uid={currentUser.uid} token={getSessionToken(currentUser.uid)} isRTL={isRTL} onExpired={() => { checkAuthStatus(401); }} />}
+        {activeTab === 'family' && <Suspense fallback={<p>فتح دفتر العائلة…</p>}><FamilyWorkspace key={currentUser.uid} uid={currentUser.uid} token={getSessionToken(currentUser.uid)} isRTL={isRTL} onExpired={() => { checkAuthStatus(401); }} /></Suspense>}
 
 
         {/* PWA Install Promo Notice banner - closeable step-by-step guide */}
@@ -2633,6 +2674,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
         </AnimatePresence>
 
         {/* Dashboard View */}
+        <OfflineStatus uid={currentUser.uid} token={currentUser.token} blocked={!!expenseAmount || !!incomeAmount || settingsSaving || activeTab==='family' || getPendingOps(currentUser.uid).length>0} />
         {activeTab === 'dashboard' && (
           <div className="space-y-4">
             
@@ -2939,27 +2981,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                 </div>
               </div>
 
-              {/* Grid of Categories chips */}
-              <div>
-                <label className="block text-xs font-bold mb-2 text-[#2c1f0e]">تصنيف ونوع المصروف:</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {Object.keys(CAT_EMOJIS).slice(0, 9).map(catName => (
-                    <button
-                      key={catName}
-                      type="button"
-                      onClick={() => setExpenseCategory(catName)}
-                      className={`p-2.5 rounded-lg border text-[11px] font-bold flex flex-col items-center justify-center gap-1 transition-all ${
-                        expenseCategory === catName
-                          ? 'bg-[#e0f5f2] border-[#0a7c6b] text-[#0a7c6b] scale-[1.03] shadow-xs'
-                          : 'bg-[#fdf3e0]/50 border-[#ddd0b8] text-[#7a6a52] hover:bg-[#fffdf7]'
-                      }`}
-                    >
-                      <span className="text-base">{CAT_EMOJIS[catName]}</span>
-                      <span>{catName.split(' ')[0]}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <ExpenseCategories uid={currentUser.uid} token={currentUser.token || ''} value={expenseCategory} onChange={setExpenseCategory} />
 
               <div>
                 <label className="block text-xs font-bold mb-1.5 text-[#2c1f0e]">تاريخ الدفع الموثق</label>
@@ -3055,72 +3077,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               </div>
             </div>
 
-            {/* Recharts Graphical Distribution of Expenses (Conditioned) */}
-            {settings.showCharts && (
-              <div className="space-y-4">
-                
-                {/* 1. Category distribution (Doughnut/Pie) */}
-                <div className="bg-white rounded-2xl p-4 border border-[#e8dcc8] shadow-sm">
-                  <h3 className="text-xs font-black text-[#2c1f0e] mb-3">📂 توزيع المصروفات تبعا للأصناف والبنود</h3>
-                  
-                  {pieChartData.length === 0 ? (
-                    <div className="py-8 text-center text-xs text-[#7a6a52]">
-                      لا توجد كشوف مصاريف مسجلة لإنشاء الدائرة التفصيلية
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="h-44 w-full relative">
-                        <ResponsiveContainer width="100%" height="100%">
-                          <RechartsPieChart>
-                            <Pie
-                              data={pieChartData}
-                              cx="50%"
-                              cy="50%"
-                              innerRadius={45}
-                              outerRadius={65}
-                              paddingAngle={3}
-                              dataKey="value"
-                            >
-                              {pieChartData.map((entry, index) => (
-                                <Cell key={`cell-${index}`} fill={entry.color} />
-                              ))}
-                            </Pie>
-                            <RechartsTooltip formatter={(value: any) => [`${value} ${settings.currency}`, 'المبلغ']} />
-                          </RechartsPieChart>
-                        </ResponsiveContainer>
-                      </div>
-
-                      {/* Manual legend representation inside Arabic */}
-                      <div className="flex flex-wrap gap-2.5 items-center justify-center mt-3">
-                        {pieChartData.map((entry, index) => (
-                          <div key={index} className="flex items-center gap-1.5 text-[9.5px] font-bold text-[#7a6a52]">
-                            <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: entry.color }} />
-                            <span>{entry.name}: {entry.value.toLocaleString(currentLocale)} {settings.currency}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* 2. Daily Expenses list chart (Bar chart) */}
-                <div className="bg-white rounded-2xl p-4 border border-[#e8dcc8] shadow-sm">
-                  <h3 className="text-xs font-black text-[#2c1f0e] mb-3">📈 تمثيل تدفق النفقات خلال أيام الشهر المالية</h3>
-                  
-                  <div className="h-44 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <RechartsBarChart data={dailyDataArray} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
-                        <XAxis dataKey="day" stroke="#b8a88a" fontSize={10} tickLine={false} />
-                        <YAxis stroke="#b8a88a" fontSize={10} tickLine={false} />
-                        <RechartsTooltip formatter={(value: any) => [`${value} ${settings.currency}`, 'المصروف اليومي']} />
-                        <Bar dataKey="المصروف" fill="#e67e22" radius={[4, 4, 0, 0]} />
-                      </RechartsBarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-
-              </div>
-            )}
+            {settings.showCharts && <Suspense fallback={<p>تحميل الرسم…</p>}><ExpenseCharts pieChartData={pieChartData} dailyDataArray={dailyDataArray} currency={settings.currency} currentLocale={currentLocale} /></Suspense>}
 
             {/* Standalone Statement Action Buttons triggers block */}
             <div className="bg-white rounded-xl p-3.5 border border-[#e8dcc8] shadow-xs">
@@ -3171,7 +3128,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
               >
                 الوارد فقط 💰
               </button>
-              {Object.keys(CAT_EMOJIS).slice(0, 9).map(catName => (
+              {allExpenseCategories.map(catName => (
                 <button
                   key={catName}
                   onClick={() => setActiveFilter(catName)}
@@ -3634,7 +3591,7 @@ _Smart authenticated report automatically exported from Albait Alsaeed Local App
                         onChange={e => setRecCategory(e.target.value)}
                         className="w-full p-2 bg-white border border-[#ddd0b8] rounded-lg text-xs font-semibold text-[#2c1f0e]"
                       >
-                        {Object.keys(CAT_EMOJIS).slice(0, 9).map(catName => (
+                        {allExpenseCategories.map(catName => (
                           <option key={catName} value={catName}>
                             {CAT_EMOJIS[catName]} {catName}
                           </option>

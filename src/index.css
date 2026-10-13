@@ -136,3 +136,12 @@ body { margin: 0; background: var(--home-paper); }
 }
 
 .settings-basics > div:last-child { border-bottom: 0; padding-bottom: 0; }
+
+@media print {
+  body.family-print * { visibility: hidden; }
+  body.family-print .family-statement, body.family-print .family-statement * { visibility: visible; }
+  body.family-print .family-statement { position: absolute; inset: 0 auto auto 0; width: 100%; color: #000; background: #fff; border: 0; }
+  body.family-print .family-statement button, body.family-print .family-statement summary { display: none; }
+  body.family-print .family-statement .overflow-x-auto { overflow: visible; }
+  body.family-print .family-statement th, body.family-print .family-statement td { border-bottom: 1px solid #ccc; padding: 6px; }
+}

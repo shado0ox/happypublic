@@ -1,3 +1,4 @@
+import { mountCategories } from './server/categories';
 import express from 'express';
 import { mountFamilies } from './server/families';
 import { createServer as createViteServer } from 'vite';
@@ -359,7 +360,9 @@ class SQLiteDatabase {
     })();
   }
 
-  restoreUserBundle(uid: string, settings: Setting | undefined, txs: Transaction[] | undefined, bills: RecurringBill[] | undefined, replace: boolean) {
+  getCategories(uid:string){return (this.db.prepare("SELECT name FROM ledger_categories WHERE scope='personal' AND scopeId=? ORDER BY name").all(uid) as any[]).map(row=>row.name);}
+
+  restoreUserBundle(uid: string, settings: Setting | undefined, txs: Transaction[] | undefined, bills: RecurringBill[] | undefined, replace: boolean, categories?: string[]) {
     this.db.transaction(() => {
       // Check collisions before removing anything, including the caller's rows.
       for (const tx of txs ?? []) {
@@ -369,6 +372,11 @@ class SQLiteDatabase {
       for (const bill of bills ?? []) {
         const owner = this.db.prepare('SELECT uid FROM recurring_bills WHERE id = ?').get(bill.id) as any;
         if (owner && owner.uid !== uid) throw new HttpError(404, 'السجل غير متاح');
+      }
+      if(categories){
+        if(replace)this.db.prepare("DELETE FROM ledger_categories WHERE scope='personal' AND scopeId=?").run(uid);
+        for(const name of categories)this.db.prepare("INSERT OR IGNORE INTO ledger_categories VALUES ('personal',?,?)").run(uid,name);
+        if((this.db.prepare("SELECT COUNT(*) AS n FROM ledger_categories WHERE scope='personal' AND scopeId=?").get(uid) as any).n>100)throw new HttpError(400,'تصنيفات كثيرة');
       }
       if (settings) this.saveSettings(settings);
       if (replace && txs) this.deleteAllTransactionsForUser(uid);
@@ -607,6 +615,7 @@ async function startServer() {
     next();
   });
 
+  app.use('/api', (_req,res,next)=>{res.set('Cache-Control','private, no-store');next();});
   app.use(express.json({ limit: '2mb' }));
 
   // Connection tracking for Real-time Device-to-Device Sync
@@ -618,13 +627,13 @@ async function startServer() {
   }
   let syncClients: SyncClient[] = [];
 
-  function notifySyncClients(uid: string) {
+  function notifySyncClients(uid: string, scope = 'personal') {
     const clients = syncClients.filter(c => c.uid === uid);
     console.log(`Broadcasting sync event to ${clients.length} clients for user ${uid}`);
     clients.forEach(client => {
       if (!db.getUser(client.uid, client.token)) return client.res.end();
       try {
-        client.res.write(`data: ${JSON.stringify({ type: 'sync_required' })}\n\n`);
+        client.res.write(`data: ${JSON.stringify({ type: 'sync_required', scope })}\n\n`);
       } catch (e) {
         // Ignored. Client likely disconnected.
       }
@@ -1007,6 +1016,7 @@ async function startServer() {
         user: sanitizeUser(user),
         settings: conf || {},
         transactions: txs || [],
+        categories: db.getCategories(uid),
         recurring_bills: db.getRecurringBills(uid)
       };
 
@@ -1026,6 +1036,7 @@ async function startServer() {
       const body = object(req.body);
       const user = (req as any).authUser as User;
       if (body.mode !== undefined && body.mode !== 'merge' && body.mode !== 'replace') throw new HttpError(400, 'وضع استيراد غير صالح');
+      const categories=body.categories===undefined?undefined:(Array.isArray(body.categories) && body.categories.length<=100 ? body.categories.map(name=>text(name,80,true).trim()) : (()=>{throw new HttpError(400,'تصنيفات غير صالحة');})());
       const settings = body.settings === undefined ? undefined : settingsInput(body.settings, uid);
       const validateRows = (rows: unknown) => {
         if (!Array.isArray(rows) || rows.length > 10000) throw new HttpError(400, 'عدد السجلات أو نوعها غير صالح');
@@ -1044,8 +1055,8 @@ async function startServer() {
       for (const rows of [importedTxs, importedBills]) {
         if (rows && new Set(rows.map(row => row.id)).size !== rows.length) throw new HttpError(400, 'معرفات مكررة في ملف الاستيراد');
       }
-      if (!settings && !importedTxs && !importedBills) throw new HttpError(400, 'ملف استيراد فارغ');
-      db.restoreUserBundle(uid, settings, importedTxs, importedBills, body.mode === 'replace');
+      if (!settings && !importedTxs && !importedBills && !categories) throw new HttpError(400, 'ملف استيراد فارغ');
+      db.restoreUserBundle(uid, settings, importedTxs, importedBills, body.mode === 'replace', categories);
       notifySyncClients(uid);
       res.json({ success: true, count: importedTxs?.length ?? 0, billCount: importedBills?.length ?? 0 });
     } catch (e: any) {
@@ -1054,7 +1065,9 @@ async function startServer() {
     }
   });
 
-  mountFamilies(app, dbPath, requireAuth, notifySyncClients);
+  mountFamilies(app, dbPath, requireAuth, uid => notifySyncClients(uid,'family'));
+
+  mountCategories(app, dbPath, requireAuth, uid => notifySyncClients(uid,'categories'));
 
   // Platform operations receive counts only; family roles are separate.
   app.get('/api/admin/stats', requireAdmin, (_req, res) => res.json(db.getAggregateStats()));
@@ -1076,7 +1089,7 @@ async function startServer() {
   } else {
     console.log('Running in PRODUCTION mode, serving static client files...');
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { setHeaders: (res, filePath) => { if (filePath.endsWith('sw.js') || filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache'); } }));
     app.get('*', (req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
